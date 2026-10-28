@@ -19,20 +19,56 @@ import javax.crypto.spec.GCMParameterSpec;
 public final class SecureStore {
     private static final String PREFS = "natuu_secure_prefs";
     private static final String KEY_API = "gemini_api_key_v1";
+    private static final String KEY_VOICE_API = "elevenlabs_api_key_v1";
+    private static final String KEY_VOICE_ID = "elevenlabs_voice_id_v1";
     private static final String ALIAS = "natuu_gemini_key_aes";
 
     private SecureStore() {}
 
     public static void saveApiKey(Context context, String apiKey) throws Exception {
-        byte[] ivAndCiphertext = encrypt(apiKey.trim().getBytes(StandardCharsets.UTF_8));
-        String encoded = Base64.encodeToString(ivAndCiphertext, Base64.NO_WRAP);
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit().putString(KEY_API, encoded).apply();
+        saveSecret(context, KEY_API, apiKey);
     }
 
     public static String getApiKey(Context context) {
-        String encoded = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .getString(KEY_API, null);
+        return getSecret(context, KEY_API);
+    }
+
+    public static void clearApiKey(Context context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_API).apply();
+    }
+
+    public static void saveVoiceApiKey(Context context, String apiKey) throws Exception {
+        saveSecret(context, KEY_VOICE_API, apiKey);
+    }
+
+    public static String getVoiceApiKey(Context context) {
+        return getSecret(context, KEY_VOICE_API);
+    }
+
+    public static void clearVoiceApiKey(Context context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_VOICE_API).apply();
+    }
+
+    public static void saveVoiceId(Context context, String voiceId) throws Exception {
+        saveSecret(context, KEY_VOICE_ID, voiceId);
+    }
+
+    public static String getVoiceId(Context context) {
+        return getSecret(context, KEY_VOICE_ID);
+    }
+
+    public static void clearVoiceId(Context context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_VOICE_ID).apply();
+    }
+
+    private static void saveSecret(Context context, String key, String value) throws Exception {
+        byte[] ivAndCiphertext = encrypt(value.trim().getBytes(StandardCharsets.UTF_8));
+        String encoded = Base64.encodeToString(ivAndCiphertext, Base64.NO_WRAP);
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(key, encoded).apply();
+    }
+
+    private static String getSecret(Context context, String key) {
+        String encoded = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(key, null);
         if (encoded == null || encoded.isEmpty()) return "";
         try {
             byte[] all = Base64.decode(encoded, Base64.NO_WRAP);
@@ -49,10 +85,6 @@ public final class SecureStore {
         } catch (Exception ignored) {
             return "";
         }
-    }
-
-    public static void clearApiKey(Context context) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_API).apply();
     }
 
     private static byte[] encrypt(byte[] plainText) throws Exception {

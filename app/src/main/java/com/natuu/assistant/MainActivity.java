@@ -35,6 +35,7 @@ import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Toast;
 import android.content.res.Configuration;
+import android.media.MediaPlayer;
 
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -43,6 +44,8 @@ import org.json.JSONObject;
 import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -56,6 +59,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TimeZone;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
@@ -75,6 +79,7 @@ public class MainActivity extends Activity {
     private TextToSpeech textToSpeech;
     private boolean ttsReady = false;
     private String pendingCallName = null;
+    private MediaPlayer customVoicePlayer = null;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -524,10 +529,169 @@ public class MainActivity extends Activity {
     }
 
     private void speak(String text) {
+        if (text == null || text.trim().isEmpty()) return;
+        String voiceKey = SecureStore.getVoiceApiKey(this);
+        String voiceId = SecureStore.getVoiceId(this);
+        if (!voiceKey.isEmpty() && !voiceId.isEmpty()) {
+            executor.execute(() -> {
+                try {
+                    byte[] audio = synthesizeCustomVoice(voiceKey, voiceId, text);
+                    playCustomVoiceAudio(audio);
+                } catch (Exception e) {
+                    speakWithSystemTts(text);
+                    sendNativeEvent("কাস্টম ভয়েসে সংযোগ হয়নি, তাই ফোনের বিকল্প ভয়েস ব্যবহার করছি।");
+                }
+            });
+            return;
+        }
+        speakWithSystemTts(text);
+    }
+
+    private void speakWithSystemTts(String text) {
         if (!ttsReady || textToSpeech == null || text == null || text.trim().isEmpty()) return;
         mainHandler.post(() -> {
             try { if (Build.VERSION.SDK_INT >= 21) textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, "natuu-" + System.currentTimeMillis()); else textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null); }
             catch (Exception ignored) { }
+        });
+    }
+
+    private byte[] synthesizeCustomVoice(String apiKey, String voiceId, String text) throws Exception {
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL("https://api.elevenlabs.io/v1/text-to-speech/" + Uri.encode(voiceId) + "?output_format=mp3_44100_128");
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(15000);
+            connection.setReadTimeout(45000);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("xi-api-key", apiKey);
+            connection.setRequestProperty("Accept", "audio/mpeg");
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            JSONObject body = new JSONObject();
+            body.put("text", text.length() > 4500 ? text.substring(0, 4500) : text);
+            body.put("model_id", "eleven_multilingual_v2");
+            body.put("voice_settings", new JSONObject().put("stability", 0.55).put("similarity_boost", 0.78).put("style", 0.12).put("use_speaker_boost", true));
+            byte[] requestBytes = body.toString().getBytes(StandardCharsets.UTF_8);
+            try (OutputStream os = connection.getOutputStream()) { os.write(requestBytes); }
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+                InputStream errorStream = connection.getErrorStream();
+                String error = errorStream == null ? "Voice synthesis failed" : readStream(errorStream);
+                throw new Exception("Custom voice API error (" + status + "): " + error);
+            }
+            try (InputStream in = connection.getInputStream(); java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
+                byte[] buffer = new byte[8192]; int count;
+                while ((count = in.read(buffer)) != -1) out.write(buffer, 0, count);
+                byte[] bytes = out.toByteArray();
+                if (bytes.length < 1000) throw new Exception("Voice audio response was too small");
+                return bytes;
+            }
+        } finally { if (connection != null) connection.disconnect(); }
+    }
+
+    private String readStream(InputStream stream) throws Exception {
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
+            StringBuilder text = new StringBuilder(); String line;
+            while ((line = reader.readLine()) != null) text.append(line);
+            return text.toString();
+        }
+    }
+
+    private void playCustomVoiceAudio(byte[] audio) throws Exception {
+        File file = new File(getCacheDir(), "natuu-voice-" + System.currentTimeMillis() + ".mp3");
+        try (FileOutputStream output = new FileOutputStream(file)) { output.write(audio); }
+        mainHandler.post(() -> {
+            try {
+                if (customVoicePlayer != null) {
+                    try { customVoicePlayer.stop(); } catch (Exception ignored) { }
+                    customVoicePlayer.release(); customVoicePlayer = null;
+                }
+                MediaPlayer player = new MediaPlayer();
+                customVoicePlayer = player;
+                player.setDataSource(file.getAbsolutePath());
+                player.setOnPreparedListener(MediaPlayer::start);
+                player.setOnCompletionListener(mp -> {
+                    try { mp.release(); } catch (Exception ignored) { }
+                    if (customVoicePlayer == mp) customVoicePlayer = null;
+                    try { file.delete(); } catch (Exception ignored) { }
+                });
+                player.setOnErrorListener((mp, what, extra) -> {
+                    try { mp.release(); } catch (Exception ignored) { }
+                    if (customVoicePlayer == mp) customVoicePlayer = null;
+                    try { file.delete(); } catch (Exception ignored) { }
+                    sendNativeEvent("কাস্টম ভয়েসের অডিও চালানো যায়নি। আবার চেষ্টা করো।");
+                    return true;
+                });
+                player.prepareAsync();
+            } catch (Exception e) {
+                try { if (customVoicePlayer != null) customVoicePlayer.release(); } catch (Exception ignored) { }
+                customVoicePlayer = null;
+                try { file.delete(); } catch (Exception ignored) { }
+                sendNativeEvent("কাস্টম ভয়েস চালু করা যায়নি।");
+            }
+        });
+    }
+
+    private void createCustomVoiceFromReference() {
+        String apiKey = SecureStore.getVoiceApiKey(this);
+        if (apiKey.isEmpty()) {
+            sendVoiceSetupResult(false, "আগে ElevenLabs API key সেভ করো। Gemini key আলাদা—এটি শুধু কণ্ঠ তৈরির জন্য।");
+            return;
+        }
+        executor.execute(() -> {
+            HttpURLConnection connection = null;
+            try {
+                String boundary = "----NatuuBoundary" + UUID.randomUUID().toString().replace("-", "");
+                URL url = new URL("https://api.elevenlabs.io/v1/voices/add");
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setRequestMethod("POST");
+                connection.setConnectTimeout(20000);
+                connection.setReadTimeout(90000);
+                connection.setDoOutput(true);
+                connection.setRequestProperty("xi-api-key", apiKey);
+                connection.setRequestProperty("Accept", "application/json");
+                connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+                try (OutputStream out = connection.getOutputStream(); InputStream voice = getAssets().open("natuu_voice_reference.mp3")) {
+                    writeFormField(out, boundary, "name", "Natuu Personal Voice");
+                    writeFormField(out, boundary, "description", "Private personal assistant voice created from the user's provided reference audio.");
+                    out.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"files\"; filename=\"natuu_voice_reference.mp3\"\r\nContent-Type: audio/mpeg\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+                    byte[] buffer = new byte[8192]; int count;
+                    while ((count = voice.read(buffer)) != -1) out.write(buffer, 0, count);
+                    out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                }
+                int status = connection.getResponseCode();
+                InputStream responseStream = status >= 200 && status < 300 ? connection.getInputStream() : connection.getErrorStream();
+                String response = responseStream == null ? "" : readStream(responseStream);
+                JSONObject json;
+                try { json = new JSONObject(response); } catch (JSONException e) { json = new JSONObject(); }
+                if (status < 200 || status >= 300) {
+                    String message = json.optString("detail", json.optString("message", "API key, quota অথবা voice-cloning access পরীক্ষা করো."));
+                    if (json.optJSONObject("detail") != null) message = json.optJSONObject("detail").optString("message", message);
+                    throw new Exception("Voice clone API (" + status + "): " + message);
+                }
+                String voiceId = json.optString("voice_id", "");
+                if (voiceId.isEmpty()) throw new Exception("Voice API থেকে voice ID আসেনি।");
+                SecureStore.saveVoiceId(this, voiceId);
+                sendVoiceSetupResult(true, "কাস্টম ভয়েস তৈরি হয়েছে এবং Natuu-তে যুক্ত হয়েছে। এখন থেকে উত্তর এই ভয়েসে শোনানোর চেষ্টা করবে।");
+            } catch (Exception e) {
+                String message = e.getMessage() == null ? "কাস্টম ভয়েস তৈরি করা যায়নি।" : e.getMessage();
+                sendVoiceSetupResult(false, message);
+            } finally { if (connection != null) connection.disconnect(); }
+        });
+    }
+
+    private void writeFormField(OutputStream out, String boundary, String name, String value) throws Exception {
+        out.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + value + "\r\n").getBytes(StandardCharsets.UTF_8));
+    }
+
+    private void sendVoiceSetupResult(boolean success, String message) {
+        mainHandler.post(() -> {
+            if (webView != null) {
+                String js = "window.onVoiceSetupResult && window.onVoiceSetupResult(" + success + "," + JSONObject.quote(message) + ");";
+                webView.evaluateJavascript(js, null);
+                webView.evaluateJavascript("window.onNatuuState && window.onNatuuState(" + getStateJson() + ");", null);
+            }
         });
     }
 
@@ -545,6 +709,8 @@ public class MainActivity extends Activity {
             state.put("configured", !SecureStore.getApiKey(this).isEmpty());
             state.put("model", getSharedPreferences(PREFS, MODE_PRIVATE).getString("model", MODEL_DEFAULT));
             state.put("speak", getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("speak", true));
+            state.put("customVoiceReady", !SecureStore.getVoiceId(this).isEmpty() && !SecureStore.getVoiceApiKey(this).isEmpty());
+            state.put("voiceConfigured", !SecureStore.getVoiceApiKey(this).isEmpty());
         } catch (JSONException ignored) { }
         return state;
     }
@@ -573,6 +739,13 @@ public class MainActivity extends Activity {
             catch (Exception e) { return false; }
         }
         @JavascriptInterface public void clearApiKey() { SecureStore.clearApiKey(MainActivity.this); }
+        @JavascriptInterface public boolean saveVoiceApiKey(String apiKey) {
+            if (apiKey == null || apiKey.trim().length() < 12) return false;
+            try { SecureStore.saveVoiceApiKey(MainActivity.this, apiKey); return true; }
+            catch (Exception e) { return false; }
+        }
+        @JavascriptInterface public void clearVoiceApiKey() { SecureStore.clearVoiceApiKey(MainActivity.this); SecureStore.clearVoiceId(MainActivity.this); }
+        @JavascriptInterface public void createCustomVoice() { createCustomVoiceFromReference(); }
         @JavascriptInterface public void setModel(String model) {
             if (model == null || !model.matches("[a-zA-Z0-9._-]{3,80}")) return;
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("model", model).apply();
@@ -587,7 +760,10 @@ public class MainActivity extends Activity {
                 else startSpeechRecognition();
             });
         }
-        @JavascriptInterface public void stopSpeaking() { mainHandler.post(() -> { if (textToSpeech != null) textToSpeech.stop(); }); }
+        @JavascriptInterface public void stopSpeaking() { mainHandler.post(() -> {
+            if (textToSpeech != null) textToSpeech.stop();
+            if (customVoicePlayer != null) { try { customVoicePlayer.stop(); } catch (Exception ignored) { } try { customVoicePlayer.release(); } catch (Exception ignored) { } customVoicePlayer = null; }
+        }); }
         @JavascriptInterface public void testVoice(String text) { speak(text == null ? "হ্যালো, আমি Natuu। তোমার ব্যক্তিগত AI সহকারী।" : text); }
         @JavascriptInterface public void openDeviceSettings() { mainHandler.post(() -> startActivity(new Intent(Settings.ACTION_SETTINGS))); }
     }
@@ -597,6 +773,7 @@ public class MainActivity extends Activity {
     @Override protected void onDestroy() {
         if (speechRecognizer != null) { speechRecognizer.destroy(); speechRecognizer = null; }
         if (textToSpeech != null) { textToSpeech.stop(); textToSpeech.shutdown(); textToSpeech = null; }
+        if (customVoicePlayer != null) { try { customVoicePlayer.stop(); } catch (Exception ignored) { } try { customVoicePlayer.release(); } catch (Exception ignored) { } customVoicePlayer = null; }
         executor.shutdownNow();
         if (webView != null) webView.destroy();
         super.onDestroy();
