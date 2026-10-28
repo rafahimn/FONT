@@ -451,7 +451,7 @@ public class MainActivity extends Activity {
             item.put("id", id); item.put("title", title); item.put("at", triggerAt); item.put("daily", daily);
             items.put(item); prefs.edit().putString("items", items.toString()).apply();
         } catch (JSONException ignored) { }
-        scheduleAlarm(id, title, triggerAt, daily);
+        scheduleAlarm(this, id, title, triggerAt, daily);
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             mainHandler.post(() -> requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIFICATIONS));
         }
