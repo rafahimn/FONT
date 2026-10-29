@@ -75,6 +75,16 @@ public class MainActivity extends Activity {
     private static final int REQ_WAKE_MIC = 105;
     private static final String PREFS = "natuu_prefs";
     private static final String MODEL_DEFAULT = "openrouter/free";
+    private static final String PREF_AUTO_LISTEN = "auto_listen";
+    private static final int MAX_REPLY_TOKENS = 320;
+    private static final String SYSTEM_PROMPT = "You are Natuu, a warm, kind personal friend and assistant. " +
+            "The app speaks your replies aloud in a cloned human voice, so keep every answer SHORT and conversational: " +
+            "usually one to three short sentences, never long lists or bullet points. Reply naturally in the language " +
+            "the user used — Bangla (as spoken in Bangladesh) for Bangla messages, English for English messages. " +
+            "Be helpful, clear and friendly. Never claim you performed a phone action unless the app confirms it. " +
+            "You cannot directly access private phone data or control apps unless the Natuu app tells you that action " +
+            "was completed. For risky actions such as sending messages or placing calls, require the user's explicit " +
+            "confirmation.";
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private WebView webView;
@@ -94,6 +104,23 @@ public class MainActivity extends Activity {
     private MediaPlayer customVoicePlayer = null;
     private OfflineModelManager offlineModelManager;
     private static final String CHAT_HISTORY_KEY = "natuu_chat_history_v1";
+
+    // ===== Fast streamed reply + voice pipeline state (v1.5) =====
+    // Synthesizes each finished sentence of a streamed reply and plays it back
+    // while the rest of the reply is still being generated, then re-opens the
+    // microphone for hands-free conversation when everything is spoken.
+    private boolean replyVoiceActive = false;              // a streamed reply is being spoken right now
+    private volatile boolean voiceSourceFinished = true;   // no more sentences will arrive for the current reply
+    private boolean customPlaying = false;                 // a streamed sentence is playing right now
+    private boolean systemFlushPending = false;            // first system-TTS sentence of the current reply
+    private boolean legacyReplySoundPending = false;       // a single (non-streamed) reply sound is playing
+    private volatile boolean streamStopped = false;        // user pressed the stop button
+    private boolean micAutoGuard = false;                  // avoids double auto-listen triggers
+    private final java.util.concurrent.ConcurrentLinkedDeque<File> playbackQueue = new java.util.concurrent.ConcurrentLinkedDeque<>();
+    private MediaPlayer streamingPlayer = null;
+    private final java.util.concurrent.atomic.AtomicInteger ttsReplyPending = new java.util.concurrent.atomic.AtomicInteger(0);
+    private final java.util.concurrent.atomic.AtomicBoolean customVoiceBroken = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final ExecutorService voiceSynthExecutor = Executors.newSingleThreadExecutor();
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -205,6 +232,13 @@ public class MainActivity extends Activity {
         textToSpeech = new TextToSpeech(this, status -> {
             if (status != TextToSpeech.SUCCESS) return;
             ttsReady = true;
+            textToSpeech.setOnUtteranceProgressListener(new android.speech.tts.UtteranceProgressListener() {
+                @Override public void onStart(String utteranceId) { }
+                @Override public void onDone(String utteranceId) { handleTtsEnd(utteranceId); }
+                @Override public void onStop(String utteranceId, boolean interrupted) { handleTtsEnd(utteranceId); }
+                @Override public void onError(String utteranceId) { handleTtsEnd(utteranceId); }
+                @Override public void onError(String utteranceId, int errorCode) { handleTtsEnd(utteranceId); }
+            });
             configureFemaleLeaningVoice();
         });
     }
@@ -540,9 +574,7 @@ public class MainActivity extends Activity {
                     return;
                 }
                 try {
-                    String response = askOpenRouter(key, input);
-                    rememberChatTurn(input, response);
-                    postReply(input, response, "ai", true);
+                    streamChatReply(key, input, mode, offlineReady);
                 } catch (Exception e) {
                     if ("auto".equals(mode) && offlineReady) {
                         sendOfflineReply(input);
@@ -872,7 +904,7 @@ public class MainActivity extends Activity {
             connection.setRequestProperty("Authorization", "Bearer " + apiKey);
             connection.setRequestProperty("X-Title", "Natuu Android Assistant");
 
-            String systemPrompt = "You are Natuu, a warm, kind personal assistant. Reply naturally in the language the user used, especially Bangla/Bengali as spoken in Bangladesh. Be helpful, clear, and friendly. Never claim you performed a phone action unless the app confirms it. You cannot directly access private phone data or control apps unless the Natuu app tells you that action was completed. For risky actions such as sending messages or placing calls, require the user's explicit confirmation. Keep answers concise unless the user requests detail.";
+            String systemPrompt = SYSTEM_PROMPT;
             JSONArray messages = new JSONArray()
                     .put(new JSONObject().put("role", "system").put("content", systemPrompt));
             JSONArray history = getRecentChatHistory();
@@ -887,8 +919,8 @@ public class MainActivity extends Activity {
             JSONObject body = new JSONObject()
                     .put("model", model)
                     .put("messages", messages)
-                    .put("temperature", 0.7)
-                    .put("max_tokens", 1200);
+                    .put("temperature", 0.8)
+                    .put("max_tokens", MAX_REPLY_TOKENS);
 
             byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
             try (OutputStream os = connection.getOutputStream()) { os.write(bytes); }
@@ -946,9 +978,13 @@ public class MainActivity extends Activity {
                 webView.evaluateJavascript(js, null);
             }
             if (speak && getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("speak", true)) {
-                // Fully offline answers must not block on a cloud voice API. Use the phone's
-                // installed TTS voice for these replies; custom cloning requires network access.
-                speak(reply, "offline".equals(kind));
+                // The cloned voice pack is used for every spoken reply when it is set up,
+                // including offline-AI replies (it needs internet; it falls back to the
+                // phone's TTS voice if synthesis fails). Without a clone, offline answers
+                // use the phone's installed TTS voice directly.
+                boolean customReady = !SecureStore.getVoiceApiKey(this).isEmpty() && !SecureStore.getVoiceId(this).isEmpty();
+                boolean forceSystemTts = "offline".equals(kind) && !customReady;
+                speakForReply(reply, forceSystemTts);
             }
             sendStatus("idle");
         });
@@ -1009,7 +1045,7 @@ public class MainActivity extends Activity {
                         return;
                     }
                 }
-                if (Build.VERSION.SDK_INT >= 21) textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, "natuu-" + System.currentTimeMillis());
+                if (Build.VERSION.SDK_INT >= 21) textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, "natuu-solo-" + System.currentTimeMillis());
                 else textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null);
             } catch (Exception ignored) { }
         });
@@ -1023,6 +1059,399 @@ public class MainActivity extends Activity {
         }
         return false;
     }
+
+    // =========================================================================
+    // Fast streamed replies (v1.5)
+    //
+    // The model's answer streams back while each finished sentence is
+    // synthesized with the cloned voice pack (or the phone's TTS) and spoken
+    // immediately. After the last sentence finishes playing, hands-free mode
+    // re-opens the microphone so the conversation keeps going.
+    // =========================================================================
+
+    /** Index of the next sentence boundary ('।', '.', '?', '!', newline) at or after `from`. */
+    private static int findNextSentenceBoundary(CharSequence text, int from) {
+        for (int i = Math.max(0, from); i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '\u0964' || c == '\u0965' || c == '\n' || c == '?' || c == '!') return i;
+            if (c == '.' && (i + 1 >= text.length() || Character.isWhitespace(text.charAt(i + 1)))) return i;
+        }
+        return -1;
+    }
+
+    private static boolean hasLetter(CharSequence text) {
+        if (text == null) return false;
+        for (int i = 0; i < text.length(); i++) if (Character.isLetter(text.charAt(i))) return true;
+        return false;
+    }
+
+    private String chatModelOrDefault() {
+        String model = getSharedPreferences(PREFS, MODE_PRIVATE).getString("model", MODEL_DEFAULT);
+        return "openrouter/free".equals(model) ? model : MODEL_DEFAULT;
+    }
+
+    private JSONArray buildChatMessages(String userText) throws JSONException {
+        JSONArray messages = new JSONArray().put(new JSONObject().put("role", "system").put("content", SYSTEM_PROMPT));
+        JSONArray history = getRecentChatHistory();
+        int firstHistoryIndex = Math.max(0, history.length() - 14);
+        for (int i = firstHistoryIndex; i < history.length(); i++) {
+            JSONObject turn = history.optJSONObject(i);
+            if (turn != null && ("user".equals(turn.optString("role")) || "assistant".equals(turn.optString("role")))) messages.put(turn);
+        }
+        messages.put(new JSONObject().put("role", "user").put("content", userText));
+        return messages;
+    }
+
+    private Exception explainOpenRouterFailure(int status, String raw) {
+        String error = "OpenRouter request failed";
+        if (raw != null && !raw.trim().isEmpty()) {
+            try {
+                JSONObject json = new JSONObject(raw);
+                JSONObject errorObj = json.optJSONObject("error");
+                error = errorObj != null ? errorObj.optString("message", error) : raw.trim();
+            } catch (JSONException ignored) { error = raw.trim(); }
+        }
+        if (error.length() > 320) error = error.substring(0, 320) + "…";
+        if (status == 401 || status == 403) return new Exception("Check your OpenRouter API key or access (" + status + "): " + error);
+        if (status == 402) return new Exception("Check your OpenRouter account or credits (" + status + "): " + error);
+        if (status == 429) return new Exception("The free-model request limit may be reached or the provider is busy (429). Try again shortly: " + error);
+        return new Exception("OpenRouter API error (" + status + "): " + error);
+    }
+
+    /** Streams the reply and speaks sentences while they arrive. Falls back to the older
+     *  non-streamed request and then to the offline model when nothing usable arrives. */
+    private void streamChatReply(String apiKey, String userText, String mode, boolean offlineReady) {
+        startReplyVoice();
+        StringBuilder full = new StringBuilder();
+        int spokenFrom = 0;
+        int lastUiLen = 0;
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL("https://openrouter.ai/api/v1/chat/completions");
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(9000);
+            connection.setReadTimeout(60000);
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setRequestProperty("Authorization", "Bearer " + apiKey);
+            connection.setRequestProperty("X-Title", "Natuu Android Assistant");
+            JSONObject body = new JSONObject()
+                    .put("model", chatModelOrDefault())
+                    .put("messages", buildChatMessages(userText))
+                    .put("temperature", 0.8)
+                    .put("max_tokens", MAX_REPLY_TOKENS)
+                    .put("stream", true);
+            byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+            try (OutputStream os = connection.getOutputStream()) { os.write(bytes); }
+            int status = connection.getResponseCode();
+            if (status < 200 || status >= 300) {
+                InputStream errorStream = connection.getErrorStream();
+                throw explainOpenRouterFailure(status, errorStream == null ? "" : readStream(errorStream));
+            }
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    line = line.trim();
+                    if (line.isEmpty() || !line.startsWith("data:")) continue;
+                    String payload = line.substring(5).trim();
+                    if (payload.isEmpty()) continue;
+                    if ("[DONE]".equals(payload)) break;
+                    JSONObject event;
+                    try { event = new JSONObject(payload); } catch (JSONException ignored) { continue; }
+                    JSONObject error = event.optJSONObject("error");
+                    if (error != null) throw new Exception(error.optString("message", "The AI stream failed."));
+                    JSONArray choices = event.optJSONArray("choices");
+                    if (choices == null || choices.length() == 0) continue;
+                    JSONObject message = choices.getJSONObject(0).optJSONObject("delta");
+                    if (message == null) continue;
+                    String piece = message.optString("content", "");
+                    if (piece == null || piece.isEmpty()) continue;
+                    full.append(piece);
+                    int end = findNextSentenceBoundary(full, spokenFrom);
+                    while (end >= 0) {
+                        String sentence = full.substring(spokenFrom, end + 1).trim();
+                        spokenFrom = end + 1;
+                        if (!sentence.isEmpty() && hasLetter(sentence)) deliverReplySentence(sentence);
+                        end = findNextSentenceBoundary(full, spokenFrom);
+                    }
+                    if (full.length() - lastUiLen >= 12) {
+                        postPartialReply(userText, full.toString());
+                        lastUiLen = full.length();
+                    }
+                }
+            }
+            if (spokenFrom < full.length()) {
+                String tail = full.substring(spokenFrom).trim();
+                spokenFrom = full.length();
+                if (!tail.isEmpty() && hasLetter(tail)) deliverReplySentence(tail);
+            }
+            if (full.toString().trim().isEmpty()) throw new Exception("The AI returned an empty response. Please try again.");
+            postPartialReply(userText, full.toString());
+            rememberChatTurn(userText, full.toString().trim());
+            postReply(userText, full.toString().trim(), "ai", false);
+            finishVoiceSource();
+        } catch (Exception streamError) {
+            if (full.toString().trim().length() > 0) {
+                // A usable partial answer arrived before the connection dropped.
+                String shown = full.toString().trim();
+                rememberChatTurn(userText, shown);
+                postReply(userText, shown + "\n(পুরোটা আসেনি — internet connection কেটে গিয়েছিল।)", "ai", false);
+                finishVoiceSource();
+                sendNativeEvent("Reply চলাকালে connection খোলা যায়নি; এতক্ষণের অংশটুকু দেখানো হলো। (" + abbreviate(streamError.getMessage(), 160) + ")");
+                return;
+            }
+            // Fall back to the older non-streamed request, then offline AI.
+            try {
+                String response = askOpenRouter(apiKey, userText);
+                rememberChatTurn(userText, response);
+                postReply(userText, response, "ai", true);
+                return;
+            } catch (Exception ignored) { }
+            if ("auto".equals(mode) && offlineReady) {
+                sendOfflineReply(userText);
+                return;
+            }
+            String msg = streamError.getMessage() == null ? "Could not connect to OpenRouter." : streamError.getMessage();
+            postReply(userText, "Sorry, " + msg, "error", false);
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private static String abbreviate(String value, int limit) {
+        if (value == null) return "unknown";
+        return value.length() > limit ? value.substring(0, limit) + "…" : value;
+    }
+
+    private void postPartialReply(String userText, String partial) {
+        mainHandler.post(() -> {
+            if (webView == null) return;
+            String js = "window.onAssistantPartial && window.onAssistantPartial(" + JSONObject.quote(userText) + "," + JSONObject.quote(partial) + ");";
+            webView.evaluateJavascript(js, null);
+        });
+    }
+
+    // ---------- streamed voice queue (main-thread state machine) ----------
+
+    /** Called from the streaming thread before the first sentence; arms the voice pipeline. */
+    private void startReplyVoice() {
+        mainHandler.post(() -> {
+            streamStopped = false;
+            customVoiceBroken.set(false);
+            if (!getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("speak", true)) {
+                replyVoiceActive = false;
+                voiceSourceFinished = true;
+                return;
+            }
+            clearVoiceQueueState();
+            systemFlushPending = false;
+            replyVoiceActive = true;
+            voiceSourceFinished = false;
+        });
+    }
+
+    /** Called when the reply text stream ends; the queue drains and the mic re-opens. */
+    private void finishVoiceSource() {
+        mainHandler.post(() -> {
+            voiceSourceFinished = true;
+            if (replyVoiceActive) releaseVoiceDone();
+            else onReplyVoiceDone();
+        });
+    }
+
+    private void clearVoiceQueueState() {
+        ttsReplyPending.set(0);
+        File leftover;
+        while ((leftover = playbackQueue.pollFirst()) != null) {
+            try { leftover.delete(); } catch (Exception ignored) { }
+        }
+        if (streamingPlayer != null) {
+            try { streamingPlayer.stop(); } catch (Exception ignored) { }
+            try { streamingPlayer.release(); } catch (Exception ignored) { }
+            streamingPlayer = null;
+        }
+        customPlaying = false;
+    }
+
+    private void stopAllSpokenAudio() {
+        streamStopped = true;
+        voiceSourceFinished = true;
+        replyVoiceActive = false;
+        legacyReplySoundPending = false;
+        if (textToSpeech != null) { try { textToSpeech.stop(); } catch (Exception ignored) { } }
+        ttsReplyPending.set(0);
+        File leftover;
+        while ((leftover = playbackQueue.pollFirst()) != null) {
+            try { leftover.delete(); } catch (Exception ignored) { }
+        }
+        if (streamingPlayer != null) {
+            try { streamingPlayer.stop(); } catch (Exception ignored) { }
+            try { streamingPlayer.release(); } catch (Exception ignored) { }
+            streamingPlayer = null;
+        }
+        customPlaying = false;
+        if (customVoicePlayer != null) {
+            try { customVoicePlayer.stop(); } catch (Exception ignored) { }
+            try { customVoicePlayer.release(); } catch (Exception ignored) { }
+            customVoicePlayer = null;
+        }
+    }
+
+    /** Called on the main thread whenever something finished; ends the reply loop when all is quiet. */
+    private void releaseVoiceDone() {
+        if (customPlaying) return;
+        if (!playbackQueue.isEmpty()) return;
+        if (ttsReplyPending.get() > 0) return;
+        if (!voiceSourceFinished) return;
+        if (!replyVoiceActive) return;
+        replyVoiceActive = false;
+        onReplyVoiceDone();
+    }
+
+    /** The streamed reply finished being spoken — reset the mic for the next question. */
+    private void onReplyVoiceDone() {
+        // Runs on the main thread.
+        sendStatus("idle");
+        if (!getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_AUTO_LISTEN, true)) return;
+        if (!activityInForeground) return;
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return;
+        if (micAutoGuard) return;
+        micAutoGuard = true;
+        mainHandler.postDelayed(() -> {
+            micAutoGuard = false;
+            if (!activityInForeground) return;
+            if (!getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_AUTO_LISTEN, true)) return;
+            WakeWordService.pause(MainActivity.this);
+            startSpeechRecognition();
+        }, 650);
+    }
+
+    /** Speaks the next streamed sentence. Prefers the cloned voice pack; falls back to TTS. */
+    private void deliverReplySentence(final String sentence) {
+        if (sentence == null || sentence.trim().isEmpty() || streamStopped) return;
+        if (!getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("speak", true)) return;
+        boolean customReady = !SecureStore.getVoiceApiKey(this).isEmpty() && !SecureStore.getVoiceId(this).isEmpty();
+        if (!customReady) {
+            speakSentenceSystem(sentence);
+            return;
+        }
+        voiceSynthExecutor.execute(() -> {
+            if (streamStopped) return;
+            try {
+                String voiceKey = SecureStore.getVoiceApiKey(MainActivity.this);
+                String voiceId = SecureStore.getVoiceId(MainActivity.this);
+                byte[] audio = synthesizeCustomVoice(voiceKey, voiceId, sentence);
+                if (streamStopped) return;
+                final File file = new File(getCacheDir(), "natuu-stream-" + System.nanoTime() + ".mp3");
+                try (FileOutputStream out = new FileOutputStream(file)) { out.write(audio); }
+                mainHandler.post(() -> {
+                    if (streamStopped) {
+                        try { file.delete(); } catch (Exception ignored) { }
+                        return;
+                    }
+                    playbackQueue.add(file);
+                    kickStreamPlayback();
+                });
+            } catch (Exception e) {
+                if (customVoiceBroken.compareAndSet(false, true)) {
+                    sendNativeEvent("Voice pack voice synthesis এরপর ও চালানো যাচ্ছে না (" + abbreviate(e.getMessage(), 150) + ") — বাকিটা ফোনের TTS voice-এ বলছি।");
+                }
+                speakSentenceSystem(sentence);
+            }
+        });
+    }
+
+    private void speakSentenceSystem(final String sentence) {
+        ttsReplyPending.incrementAndGet();
+        mainHandler.post(() -> {
+            if (streamStopped) {
+                ttsReplyPending.updateAndGet(v -> v > 0 ? v - 1 : 0);
+                return;
+            }
+            if (!ttsReady || textToSpeech == null) {
+                ttsReplyPending.updateAndGet(v -> v > 0 ? v - 1 : 0);
+                releaseVoiceDone();
+                return;
+            }
+            boolean first = !systemFlushPending;
+            systemFlushPending = true;
+            try {
+                textToSpeech.speak(sentence, first ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD, null, "natuu-reply-" + System.currentTimeMillis());
+            } catch (Exception e) {
+                ttsReplyPending.updateAndGet(v -> v > 0 ? v - 1 : 0);
+                releaseVoiceDone();
+            }
+        });
+    }
+
+    /** Routes TTS engine callbacks used by the streaming pipeline. */
+    private void handleTtsEnd(String utteranceId) {
+        if (utteranceId == null) return;
+        if (utteranceId.startsWith("natuu-reply-")) {
+            ttsReplyPending.updateAndGet(v -> v > 0 ? v - 1 : 0);
+            mainHandler.post(this::releaseVoiceDone);
+        } else if (utteranceId.startsWith("natuu-solo-")) {
+            legacyVoiceSoundFinished();
+        }
+    }
+
+    /** Starts playing the next synthesized sentence file, if any is ready. */
+    private void kickStreamPlayback() {
+        // main thread only
+        if (customPlaying) return;
+        File next = playbackQueue.pollFirst();
+        if (next == null) {
+            if (replyVoiceActive) releaseVoiceDone();
+            return;
+        }
+        if (streamStopped) {
+            try { next.delete(); } catch (Exception ignored) { }
+            kickStreamPlayback();
+            return;
+        }
+        if (!replyVoiceActive) {
+            try { next.delete(); } catch (Exception ignored) { }
+            kickStreamPlayback();
+            return;
+        }
+        customPlaying = true;
+        try {
+            MediaPlayer player = new MediaPlayer();
+            streamingPlayer = player;
+            player.setDataSource(next.getAbsolutePath());
+            player.setOnPreparedListener(MediaPlayer::start);
+            player.setOnCompletionListener(mp -> {
+                if (streamingPlayer == mp) streamingPlayer = null;
+                try { mp.release(); } catch (Exception ignored) { }
+                customPlaying = false;
+                try { next.delete(); } catch (Exception ignored) { }
+                releaseVoiceDone();
+                kickStreamPlayback();
+            });
+            player.setOnErrorListener((mp, what, extra) -> {
+                if (streamingPlayer == mp) streamingPlayer = null;
+                try { mp.release(); } catch (Exception ignored) { }
+                customPlaying = false;
+                try { next.delete(); } catch (Exception ignored) { }
+                releaseVoiceDone();
+                kickStreamPlayback();
+                return true;
+            });
+            player.prepareAsync();
+        } catch (Exception e) {
+            customPlaying = false;
+            if (streamingPlayer != null) {
+                try { streamingPlayer.release(); } catch (Exception ignored) { }
+                streamingPlayer = null;
+            }
+            try { next.delete(); } catch (Exception ignored) { }
+            releaseVoiceDone();
+            kickStreamPlayback();
+        }
+    }
+
+    // ===================== end of streamed reply engine =====================
 
     private byte[] synthesizeCustomVoice(String apiKey, String voiceId, String text) throws Exception {
         HttpURLConnection connection = null;
@@ -1089,11 +1518,13 @@ public class MainActivity extends Activity {
                     try { mp.release(); } catch (Exception ignored) { }
                     if (customVoicePlayer == mp) customVoicePlayer = null;
                     try { file.delete(); } catch (Exception ignored) { }
+                    legacyVoiceSoundFinished();
                 });
                 player.setOnErrorListener((mp, what, extra) -> {
                     try { mp.release(); } catch (Exception ignored) { }
                     if (customVoicePlayer == mp) customVoicePlayer = null;
                     try { file.delete(); } catch (Exception ignored) { }
+                    legacyVoiceSoundFinished();
                     sendNativeEvent("Could not play the custom voice audio. Please try again.");
                     return true;
                 });
@@ -1102,9 +1533,27 @@ public class MainActivity extends Activity {
                 try { if (customVoicePlayer != null) customVoicePlayer.release(); } catch (Exception ignored) { }
                 customVoicePlayer = null;
                 try { file.delete(); } catch (Exception ignored) { }
+                legacyVoiceSoundFinished();
                 sendNativeEvent("Could not start the custom voice.");
             }
         });
+    }
+
+    /** Called when a non-streamed (single-shot) reply sound finishes playing. */
+    private void legacyVoiceSoundFinished() {
+        mainHandler.post(() -> {
+            if (legacyReplySoundPending) {
+                legacyReplySoundPending = false;
+                onReplyVoiceDone();
+            }
+        });
+    }
+
+    /** Marks the next spoken reply (non-streamed) so its playback end can re-open the mic. */
+    private void speakForReply(String text, boolean forceSystemTts) {
+        legacyReplySoundPending = true;
+        streamStopped = false;
+        speak(text, forceSystemTts);
     }
 
     private void createCustomVoiceFromReference() {
@@ -1215,6 +1664,7 @@ public class MainActivity extends Activity {
             if (!"openrouter/free".equals(selectedModel)) selectedModel = MODEL_DEFAULT;
             state.put("model", selectedModel);
             state.put("speak", getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("speak", true));
+            state.put("autoListen", getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_AUTO_LISTEN, true));
             state.put("customVoiceReady", !SecureStore.getVoiceId(this).isEmpty() && !SecureStore.getVoiceApiKey(this).isEmpty());
             state.put("voiceConfigured", !SecureStore.getVoiceApiKey(this).isEmpty());
             state.put("speechLanguage", getSharedPreferences(PREFS, MODE_PRIVATE).getString("speech_language", "auto"));
@@ -1324,12 +1774,13 @@ public class MainActivity extends Activity {
                 else startSpeechRecognition();
             });
         }
-        @JavascriptInterface public void stopSpeaking() { mainHandler.post(() -> {
-            if (textToSpeech != null) textToSpeech.stop();
-            if (customVoicePlayer != null) { try { customVoicePlayer.stop(); } catch (Exception ignored) { } try { customVoicePlayer.release(); } catch (Exception ignored) { } customVoicePlayer = null; }
-        }); }
+        @JavascriptInterface public void stopSpeaking() { mainHandler.post(() -> { stopAllSpokenAudio(); sendStatus("idle"); }); }
         @JavascriptInterface public void testVoice(String text) { speak(text == null ? "Hello, I am Natuu, your personal AI assistant." : text); }
         @JavascriptInterface public void openDeviceSettings() { mainHandler.post(() -> startActivity(new Intent(Settings.ACTION_SETTINGS))); }
+        @JavascriptInterface public void setAutoListenEnabled(boolean enabled) {
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(PREF_AUTO_LISTEN, enabled).apply();
+            sendNativeEvent(enabled ? "Hands-free mode চালু: প্রতিবার reply শেষ হলে আবার শোনা শুরু হবে।" : "Hands-free mode বন্ধ: কথা বলতে মাইক বাটনে চাপ দিন।");
+        }
     }
 
     @Override public void onConfigurationChanged(Configuration newConfig) { super.onConfigurationChanged(newConfig); }
@@ -1337,6 +1788,7 @@ public class MainActivity extends Activity {
     @Override protected void onDestroy() {
         if (speechRecognizer != null) { speechRecognizer.destroy(); speechRecognizer = null; }
         if (speechPackRecognizer != null) { try { speechPackRecognizer.destroy(); } catch (Exception ignored) { } speechPackRecognizer = null; }
+        voiceSynthExecutor.shutdownNow();
         if (textToSpeech != null) { textToSpeech.stop(); textToSpeech.shutdown(); textToSpeech = null; }
         if (customVoicePlayer != null) { try { customVoicePlayer.stop(); } catch (Exception ignored) { } try { customVoicePlayer.release(); } catch (Exception ignored) { } customVoicePlayer = null; }
         executor.shutdownNow();

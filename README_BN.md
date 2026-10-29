@@ -1,4 +1,15 @@
-# Natuu — Personal AI Assistant (Android) · v1.3.0
+# Natuu — Personal AI Assistant (Android) · v1.5.0
+
+## v1.5.0 — দ্রুত কথোপকথন (fast conversation)
+
+- **Streaming replies:** the model's answer streams in and each finished sentence is spoken immediately with the cloned voice pack (or the phone's TTS) while the rest is still generating — no more waiting for the whole reply.
+- **Cloned voice everywhere:** once the ElevenLabs clone is created, every spoken reply uses it — including offline-AI replies (falls back to the phone's TTS when synthesis is unavailable).
+- **Hands-free mode (default ON):** after the spoken reply finishes, the microphone reopens automatically for continuous conversation. Toggle: Settings → **Hands-free conversation**.
+- **Shorter conversational answers:** system prompt + max_tokens tuned for quick, natural replies in normal conversation.
+- Version bumped to `versionCode 6` / `versionName 1.5.0`.
+- See **INSTALL-GUIDE-BANGLA.md** for step-by-step Bangla setup (APK install, OpenRouter key, speech packs, ElevenLabs voice, hands-free mode).
+
+---
 
 Natuu is a Bangla-first personal Android assistant with hybrid AI: OpenRouter free models online plus an optional local Qwen3-0.6B model for offline text chat. It also includes a local API-key setup screen, basic app-launch commands, dialer handoff, alarm handoff, and scheduled reminders.
 
