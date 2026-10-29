@@ -128,14 +128,23 @@ class OfflineModelManager(context: Context) {
 
     private fun ensureConversationLoaded() {
         if (engine != null && conversation != null) return
+        val writableCachePath = resolveWritableCacheDirectory()
         val candidate = Engine(
             EngineConfig(
                 modelPath = modelFile.absolutePath,
-                cacheDir = File(appContext.cacheDir, "natuu-litert-cache").absolutePath
+                // LiteRT-LM expects this directory to already exist and be writable.
+                cacheDir = writableCachePath
             )
         )
         // Engine initialization can take several seconds; this runs only on the background worker.
-        candidate.initialize()
+        // Release a partially initialized native engine if initialization still fails for any
+        // reason (for example, a corrupt model or insufficient device memory).
+        try {
+            candidate.initialize()
+        } catch (e: Exception) {
+            try { candidate.close() } catch (_: Exception) { }
+            throw e
+        }
         engine = candidate
         try {
             conversation = candidate.createConversation(
@@ -150,6 +159,34 @@ class OfflineModelManager(context: Context) {
             try { candidate.close() } catch (_: Exception) { }
             throw e
         }
+    }
+
+
+    /**
+     * Some LiteRT-LM versions do not create cacheDir themselves. Create and test it
+     * before passing the path to native code, and fall back to app-private storage
+     * if the nested cache directory cannot be used.
+     */
+    private fun resolveWritableCacheDirectory(): String {
+        val candidates = listOf(
+            File(appContext.cacheDir, "natuu-litert-cache"),
+            File(appContext.filesDir, "natuu-litert-cache"),
+            appContext.cacheDir
+        )
+        for (directory in candidates) {
+            try {
+                if (!directory.exists() && !directory.mkdirs()) continue
+                if (!directory.isDirectory || !directory.canWrite()) continue
+                val probe = File.createTempFile(".natuu-cache-check-", ".tmp", directory)
+                val removed = probe.delete()
+                if (removed) return directory.absolutePath
+            } catch (_: Exception) {
+                // Try the next private app directory.
+            }
+        }
+        throw IllegalStateException(
+            "Offline AI cannot create a writable cache folder. Check free phone storage, then reopen Natuu."
+        )
     }
 
     fun close() {

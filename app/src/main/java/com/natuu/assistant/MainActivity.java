@@ -26,6 +26,7 @@ import android.provider.Settings;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
+import android.speech.ModelDownloadListener;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.Voice;
 import android.webkit.JavascriptInterface;
@@ -78,6 +79,11 @@ public class MainActivity extends Activity {
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private WebView webView;
     private SpeechRecognizer speechRecognizer;
+    private SpeechRecognizer speechPackRecognizer;
+    private boolean speechAutoMode = true;
+    private boolean speechFallbackAttempted = false;
+    private boolean speechOnlineFallbackAttempted = false;
+    private String currentSpeechLanguage = "bn-BD";
     private boolean webPageReady = false;
     private boolean activityInForeground = false;
     private boolean pendingWakeDispatch = false;
@@ -261,13 +267,37 @@ public class MainActivity extends Activity {
     }
 
     private void startSpeechRecognition() {
+        String languageSetting = getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getString("speech_language", "auto");
+        speechAutoMode = "auto".equals(languageSetting);
+        speechFallbackAttempted = false;
+        speechOnlineFallbackAttempted = false;
+        String firstLanguage = "en-US".equals(languageSetting) ? "en-US" : "bn-BD";
+        startSpeechRecognitionAttempt(firstLanguage);
+    }
+
+    private void startSpeechRecognitionAttempt(String language) {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            sendNativeEvent("This phone has no speech recognition service available. Install or enable Google speech services.");
+            sendStatus("idle");
+            sendNativeEvent("এই ফোনে speech recognition service চালু নেই। Google Speech Services/voice input চালু করুন।");
             return;
         }
+        // Try local recognition first, but do not get stuck there if the selected language
+        // model is missing. The normal provider can use online recognition when needed.
+        final boolean useOnDevice = !speechOnlineFallbackAttempted
+                && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                && SpeechRecognizer.isOnDeviceRecognitionAvailable(this);
+        currentSpeechLanguage = language;
         try {
-            if (speechRecognizer != null) { speechRecognizer.destroy(); speechRecognizer = null; }
-            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
+            if (speechRecognizer != null) {
+                try { speechRecognizer.cancel(); } catch (Exception ignored) { }
+                speechRecognizer.destroy();
+                speechRecognizer = null;
+            }
+            speechRecognizer = useOnDevice
+                    ? SpeechRecognizer.createOnDeviceSpeechRecognizer(this)
+                    : SpeechRecognizer.createSpeechRecognizer(this);
+            final SpeechRecognizer thisRecognizer = speechRecognizer;
             speechRecognizer.setRecognitionListener(new RecognitionListener() {
                 @Override public void onReadyForSpeech(Bundle params) { sendStatus("listening"); }
                 @Override public void onBeginningOfSpeech() { }
@@ -275,37 +305,209 @@ public class MainActivity extends Activity {
                 @Override public void onBufferReceived(byte[] buffer) { }
                 @Override public void onEndOfSpeech() { sendStatus("thinking"); }
                 @Override public void onError(int error) {
+                    if (speechRecognizer != thisRecognizer) return;
+                    if (shouldTryOnlineSpeechFallback(useOnDevice, error)) {
+                        speechOnlineFallbackAttempted = true;
+                        sendNativeEvent("এই ভাষার offline speech pack পাওয়া যায়নি। Android speech provider দিয়ে আবার চেষ্টা করছি; এতে internet ব্যবহার হতে পারে।");
+                        mainHandler.postDelayed(() -> startSpeechRecognitionAttempt(language), 250);
+                        return;
+                    }
+                    if (shouldTryEnglishFallback(error)) {
+                        speechFallbackAttempted = true;
+                        sendNativeEvent("বাংলা recognition হয়নি, English দিয়ে আরেকবার চেষ্টা করছি। Settings থেকে Bangla ও English speech pack download করুন।");
+                        mainHandler.postDelayed(() -> startSpeechRecognitionAttempt("en-US"), 250);
+                        return;
+                    }
                     String message;
                     if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                        message = "কথাটি বুঝতে পারিনি। আবার বলুন, অথবা মাইক্রোফোনের পাশে শান্ত পরিবেশে চেষ্টা করুন। চাইলে Settings-এ speech service/language check করুন।";
+                        message = "কথাটি বুঝতে পারিনি। আবার বলুন। Settings → Speech language packs থেকে Bangla ও English download করুন; pack না থাকলে online recognition দরকার হতে পারে।";
                     } else if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                         message = "ভয়েস ব্যবহারের জন্য Microphone permission দিন: Android Settings → Apps → Natuu → Permissions।";
+                    } else if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE) {
+                        message = "এই ভাষার speech model পাওয়া যায়নি। Natuu Settings থেকে pack download করুন অথবা ফোনের speech provider settings দেখুন।";
                     } else {
-                        message = "ভয়েস ইনপুট শুরু হয়নি। ইন্টারনেট, Microphone permission এবং Google Speech Services চালু আছে কি না দেখুন। (Error " + error + ")";
+                        message = "ভয়েস ইনপুট শুরু হয়নি। Microphone permission, speech service ও language pack check করুন। (Error " + error + ")";
                     }
-                    sendStatus("idle"); sendNativeEvent(message);
+                    sendStatus("idle");
+                    sendNativeEvent(message);
                 }
                 @Override public void onResults(Bundle results) {
+                    if (speechRecognizer != thisRecognizer) return;
                     sendStatus("thinking");
                     ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                    if (matches != null && !matches.isEmpty()) processCommand(matches.get(0));
-                    else sendNativeEvent("I did not catch that. Please try again.");
+                    if (matches != null && !matches.isEmpty() && matches.get(0) != null && !matches.get(0).trim().isEmpty()) {
+                        processCommand(matches.get(0));
+                    } else if (shouldTryOnlineSpeechFallback(useOnDevice, SpeechRecognizer.ERROR_NO_MATCH)) {
+                        speechOnlineFallbackAttempted = true;
+                        sendNativeEvent("Offline speech modelটি এই কথাটি ধরতে পারেনি। Android speech provider দিয়ে আরেকবার চেষ্টা করছি; internet ব্যবহার হতে পারে।");
+                        mainHandler.postDelayed(() -> startSpeechRecognitionAttempt(language), 250);
+                    } else if (shouldTryEnglishFallback(SpeechRecognizer.ERROR_NO_MATCH)) {
+                        speechFallbackAttempted = true;
+                        startSpeechRecognitionAttempt("en-US");
+                    } else {
+                        sendStatus("idle");
+                        sendNativeEvent("কথাটি বুঝতে পারিনি। আবার চেষ্টা করুন।");
+                    }
                 }
                 @Override public void onPartialResults(Bundle partialResults) { }
                 @Override public void onEvent(int eventType, Bundle params) { }
             });
-            Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            // Prefer Bangla for natural Bengali commands; Google Speech can still return mixed-language text.
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "bn-BD");
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "bn-BD");
-            intent.putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false);
-            intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
-            intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3);
+            Intent intent = makeSpeechRecognitionIntent(language, true);
+            // Only force offline on the on-device recognizer. The normal recognizer is allowed
+            // to use its provider's network path if the offline language pack is absent.
+            intent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, useOnDevice);
             speechRecognizer.startListening(intent);
         } catch (Exception e) {
-            sendStatus("idle"); sendNativeEvent("Voice input could not start. Check microphone access.");
+            sendStatus("idle");
+            sendNativeEvent("Voice input could not start. Check microphone access and that the selected speech pack is installed.");
         }
+    }
+
+    private boolean shouldTryOnlineSpeechFallback(boolean useOnDevice, int error) {
+        if (!useOnDevice || speechOnlineFallbackAttempted) return false;
+        return error == SpeechRecognizer.ERROR_NO_MATCH
+                || error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
+                || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE;
+    }
+
+    private boolean shouldTryEnglishFallback(int error) {
+        if (!speechAutoMode || speechFallbackAttempted || "en-US".equals(currentSpeechLanguage)) return false;
+        return error == SpeechRecognizer.ERROR_NO_MATCH
+                || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT
+                || error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED
+                || error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE
+                || error == SpeechRecognizer.ERROR_NETWORK
+                || error == SpeechRecognizer.ERROR_NETWORK_TIMEOUT
+                || error == SpeechRecognizer.ERROR_SERVER;
+    }
+
+    private Intent makeSpeechRecognitionIntent(String language, boolean allowAutoSwitch) {
+        Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, language);
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language);
+        intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3);
+        if (allowAutoSwitch && speechAutoMode && Build.VERSION.SDK_INT >= 34) {
+            ArrayList<String> languages = new ArrayList<>(Arrays.asList("bn-BD", "en-US"));
+            intent.putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_DETECTION, true);
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES, languages);
+            intent.putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_SWITCH, RecognizerIntent.LANGUAGE_SWITCH_BALANCED);
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES, languages);
+        }
+        return intent;
+    }
+
+    private void requestSpeechLanguagePack(String language) {
+        if (!"bn-BD".equals(language) && !"en-US".equals(language)) {
+            sendSpeechPackStatus("Select Bangla or English first.");
+            return;
+        }
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            sendSpeechPackStatus("এই ফোনে speech recognition service নেই। Google Speech Services install/enable করুন।");
+            return;
+        }
+        try {
+            if (speechPackRecognizer != null) {
+                try { speechPackRecognizer.destroy(); } catch (Exception ignored) { }
+                speechPackRecognizer = null;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+                    && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+                speechPackRecognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this);
+            } else {
+                speechPackRecognizer = SpeechRecognizer.createSpeechRecognizer(this);
+            }
+            Intent request = makeSpeechRecognitionIntent(language, false);
+            request.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true);
+            String label = "bn-BD".equals(language) ? "Bangla (Bangladesh)" : "English (US)";
+            final SpeechRecognizer downloadRecognizer = speechPackRecognizer;
+            if (Build.VERSION.SDK_INT >= 34) {
+                downloadRecognizer.triggerModelDownload(request, getMainExecutor(), new ModelDownloadListener() {
+                    @Override public void onProgress(int completedPercent) {
+                        sendSpeechPackStatus(label + " speech pack downloading: " + completedPercent + "%");
+                    }
+                    @Override public void onScheduled() {
+                        sendSpeechPackStatus(label + " pack download scheduled by Android. Keep the phone online; the provider will finish it in the background.");
+                        releaseSpeechPackRecognizer(downloadRecognizer);
+                    }
+                    @Override public void onSuccess() {
+                        sendSpeechPackStatus("✅ " + label + " speech pack is ready, if supported by your phone's speech provider.");
+                        releaseSpeechPackRecognizer(downloadRecognizer);
+                    }
+                    @Override public void onError(int error) {
+                        sendSpeechPackStatus(label + " pack request failed (error " + error + "). Your speech provider may not support in-app model downloads; open Speech settings below.");
+                        releaseSpeechPackRecognizer(downloadRecognizer);
+                    }
+                });
+                sendSpeechPackStatus("Requesting " + label + " speech pack from Android…");
+            } else if (Build.VERSION.SDK_INT >= 33) {
+                downloadRecognizer.triggerModelDownload(request);
+                sendSpeechPackStatus("Requested " + label + " speech pack. Android/provider may ask for confirmation or schedule it. Check again after downloading.");
+                // API 33 has no download listener. Keep the recognizer alive until the next
+                // pack request or Activity destruction instead of risking canceling a slow download.
+            } else {
+                openSpeechLanguageSettings();
+                sendSpeechPackStatus("This Android version cannot request language models directly. In Google app → Settings → Voice → Offline speech recognition, download Bangla and English if listed.");
+                releaseSpeechPackRecognizer();
+            }
+        } catch (Exception e) {
+            sendSpeechPackStatus("Could not request the pack. Open your phone's Speech/Voice input settings and download Bangla/English there.");
+            releaseSpeechPackRecognizer();
+        }
+    }
+
+    private void releaseSpeechPackRecognizer() {
+        releaseSpeechPackRecognizer(speechPackRecognizer);
+    }
+
+    private void releaseSpeechPackRecognizer(SpeechRecognizer target) {
+        if (target == null) return;
+        mainHandler.post(() -> {
+            if (speechPackRecognizer == target) speechPackRecognizer = null;
+            try { target.destroy(); } catch (Exception ignored) { }
+        });
+    }
+
+    private void openSpeechLanguageSettings() {
+        try {
+            Intent intent = new Intent(Settings.ACTION_VOICE_INPUT_SETTINGS);
+            if (intent.resolveActivity(getPackageManager()) != null) startActivity(intent);
+            else startActivity(new Intent(Settings.ACTION_SETTINGS));
+        } catch (Exception e) {
+            sendNativeEvent("Android Settings → System → Languages & input → Voice input খুলে Bangla/English pack check করুন।");
+        }
+    }
+
+    private void openTextToSpeechSettings() {
+        // ACTION_TEXT_TO_SPEECH_SETTINGS is not a public Settings constant on all SDKs.
+        // First ask the installed TTS engine to open its voice-data installer, then fall back
+        // to the common Android TTS settings action and finally the main Settings page.
+        try {
+            Intent installData = new Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA);
+            if (installData.resolveActivity(getPackageManager()) != null) {
+                startActivity(installData);
+                return;
+            }
+        } catch (Exception ignored) { }
+        try {
+            Intent ttsSettings = new Intent("com.android.settings.TTS_SETTINGS");
+            if (ttsSettings.resolveActivity(getPackageManager()) != null) {
+                startActivity(ttsSettings);
+                return;
+            }
+            startActivity(new Intent(Settings.ACTION_SETTINGS));
+        } catch (Exception e) {
+            sendNativeEvent("Android Settings → Text-to-speech output খুলে Bangla voice data download করুন, যদি পাওয়া যায়।");
+        }
+    }
+
+    private void sendSpeechPackStatus(String message) {
+        mainHandler.post(() -> {
+            if (webView != null) {
+                webView.evaluateJavascript("window.onSpeechPackStatus && window.onSpeechPackStatus(" + JSONObject.quote(message) + ");", null);
+            }
+        });
     }
 
     private void processCommand(String input) {
@@ -743,13 +945,25 @@ public class MainActivity extends Activity {
                 String js = "window.onAssistantReply && window.onAssistantReply(" + JSONObject.quote(userText) + "," + JSONObject.quote(reply) + "," + JSONObject.quote(kind) + ");";
                 webView.evaluateJavascript(js, null);
             }
-            if (speak && getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("speak", true)) speak(reply);
+            if (speak && getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("speak", true)) {
+                // Fully offline answers must not block on a cloud voice API. Use the phone's
+                // installed TTS voice for these replies; custom cloning requires network access.
+                speak(reply, "offline".equals(kind));
+            }
             sendStatus("idle");
         });
     }
 
     private void speak(String text) {
+        speak(text, false);
+    }
+
+    private void speak(String text, boolean forceSystemTts) {
         if (text == null || text.trim().isEmpty()) return;
+        if (forceSystemTts) {
+            speakWithSystemTts(text);
+            return;
+        }
         String voiceKey = SecureStore.getVoiceApiKey(this);
         String voiceId = SecureStore.getVoiceId(this);
         if (!voiceKey.isEmpty() && !voiceId.isEmpty()) {
@@ -759,7 +973,9 @@ public class MainActivity extends Activity {
                     playCustomVoiceAudio(audio);
                 } catch (Exception e) {
                     speakWithSystemTts(text);
-                    sendNativeEvent("The custom voice could not connect, so I am using the phone’s built-in voice.");
+                    String detail = e.getMessage() == null ? "unknown error" : e.getMessage();
+                    if (detail.length() > 220) detail = detail.substring(0, 220) + "…";
+                    sendNativeEvent("Custom voice failed: " + detail + ". The phone's TTS is being used if it supports this language. Check the ElevenLabs key, voice-clone setup, plan and quota.");
                 }
             });
             return;
@@ -770,9 +986,42 @@ public class MainActivity extends Activity {
     private void speakWithSystemTts(String text) {
         if (!ttsReady || textToSpeech == null || text == null || text.trim().isEmpty()) return;
         mainHandler.post(() -> {
-            try { if (Build.VERSION.SDK_INT >= 21) textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, "natuu-" + System.currentTimeMillis()); else textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null); }
-            catch (Exception ignored) { }
+            try {
+                boolean bangla = containsBanglaScript(text);
+                Locale targetLocale = bangla ? new Locale("bn", "BD") : Locale.US;
+                int languageResult = textToSpeech.setLanguage(targetLocale);
+                if (languageResult == TextToSpeech.LANG_MISSING_DATA || languageResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    Voice targetVoice = null;
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        for (Voice voice : textToSpeech.getVoices()) {
+                            Locale voiceLocale = voice.getLocale();
+                            if (voiceLocale != null && (bangla ? "bn" : "en").equalsIgnoreCase(voiceLocale.getLanguage())) {
+                                if (targetVoice == null || (!voice.isNetworkConnectionRequired() && targetVoice.isNetworkConnectionRequired())) targetVoice = voice;
+                            }
+                        }
+                    }
+                    if (targetVoice != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                        textToSpeech.setVoice(targetVoice);
+                    } else if (bangla) {
+                        // Avoid speaking Bengali phonetics through an English voice; it sounds
+                        // distorted. Keep the text visible and clearly explain how to add Bangla TTS.
+                        sendNativeEvent("এই ফোনে Bangla text-to-speech voice data পাওয়া যায়নি, তাই বিকৃত voice চালানো হয়নি। Settings → TTS voice data থেকে Bangla voice install করুন, অথবা internet ও quota-সহ Natuu custom voice ব্যবহার করুন।");
+                        return;
+                    }
+                }
+                if (Build.VERSION.SDK_INT >= 21) textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null, "natuu-" + System.currentTimeMillis());
+                else textToSpeech.speak(text, TextToSpeech.QUEUE_FLUSH, null);
+            } catch (Exception ignored) { }
         });
+    }
+
+    private static boolean containsBanglaScript(String text) {
+        if (text == null) return false;
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c >= '\u0980' && c <= '\u09FF') return true;
+        }
+        return false;
     }
 
     private byte[] synthesizeCustomVoice(String apiKey, String voiceId, String text) throws Exception {
@@ -789,8 +1038,14 @@ public class MainActivity extends Activity {
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
             JSONObject body = new JSONObject();
             body.put("text", text.length() > 4500 ? text.substring(0, 4500) : text);
-            body.put("model_id", "eleven_multilingual_v2");
-            body.put("voice_settings", new JSONObject().put("stability", 0.55).put("similarity_boost", 0.78).put("style", 0.12).put("use_speaker_boost", true));
+            boolean bangla = containsBanglaScript(text);
+            // Multilingual v2 does not list Bengali as a supported language. Eleven v3 supports
+            // Bengali and English; using one model for both keeps the custom voice more consistent.
+            body.put("model_id", "eleven_v3");
+            body.put("language_code", bangla ? "bn" : "en");
+            // Eleven v3 supports stability, but not Similarity or Speaker Boost settings.
+            // Send only the supported field so a validation error cannot force system-TTS fallback.
+            body.put("voice_settings", new JSONObject().put("stability", 0.5));
             byte[] requestBytes = body.toString().getBytes(StandardCharsets.UTF_8);
             try (OutputStream os = connection.getOutputStream()) { os.write(requestBytes); }
             int status = connection.getResponseCode();
@@ -962,6 +1217,7 @@ public class MainActivity extends Activity {
             state.put("speak", getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean("speak", true));
             state.put("customVoiceReady", !SecureStore.getVoiceId(this).isEmpty() && !SecureStore.getVoiceApiKey(this).isEmpty());
             state.put("voiceConfigured", !SecureStore.getVoiceApiKey(this).isEmpty());
+            state.put("speechLanguage", getSharedPreferences(PREFS, MODE_PRIVATE).getString("speech_language", "auto"));
         } catch (JSONException ignored) { }
         return state;
     }
@@ -1046,6 +1302,20 @@ public class MainActivity extends Activity {
         @JavascriptInterface public void setSpeakEnabled(boolean enabled) {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean("speak", enabled).apply();
         }
+        @JavascriptInterface public void setSpeechLanguage(String language) {
+            if (!"auto".equals(language) && !"bn-BD".equals(language) && !"en-US".equals(language)) return;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("speech_language", language).apply();
+            sendNativeEvent("Voice input language saved: " + ("auto".equals(language) ? "Auto (Bangla + English)" : ("bn-BD".equals(language) ? "Bangla" : "English")) + ".");
+        }
+        @JavascriptInterface public void downloadSpeechLanguagePack(String language) {
+            mainHandler.post(() -> requestSpeechLanguagePack(language));
+        }
+        @JavascriptInterface public void openSpeechLanguageSettings() {
+            mainHandler.post(() -> MainActivity.this.openSpeechLanguageSettings());
+        }
+        @JavascriptInterface public void openTextToSpeechSettings() {
+            mainHandler.post(() -> MainActivity.this.openTextToSpeechSettings());
+        }
         @JavascriptInterface public void sendCommand(String text) { processCommand(text); }
         @JavascriptInterface public void requestSpeech() {
             mainHandler.post(() -> {
@@ -1066,6 +1336,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         if (speechRecognizer != null) { speechRecognizer.destroy(); speechRecognizer = null; }
+        if (speechPackRecognizer != null) { try { speechPackRecognizer.destroy(); } catch (Exception ignored) { } speechPackRecognizer = null; }
         if (textToSpeech != null) { textToSpeech.stop(); textToSpeech.shutdown(); textToSpeech = null; }
         if (customVoicePlayer != null) { try { customVoicePlayer.stop(); } catch (Exception ignored) { } try { customVoicePlayer.release(); } catch (Exception ignored) { } customVoicePlayer = null; }
         executor.shutdownNow();

@@ -47,6 +47,9 @@ public final class WakeWordService extends Service {
     private boolean paused = true;
     private boolean listening;
     private boolean foreground;
+    private boolean localRecognitionUnavailable;
+    private boolean offlineLanguageWarning;
+    private boolean disableAutoLanguageSwitch;
     private boolean wakePendingForNotification;
     private String pendingWakeCommand = "";
     private int nextRecognitionLanguage = 0;
@@ -167,9 +170,21 @@ public final class WakeWordService extends Service {
         PendingIntent stop = PendingIntent.getService(this, 4209, stopIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
         Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
                 ? new Notification.Builder(this, CHANNEL_ID) : new Notification.Builder(this);
+        String listeningText;
+        if (paused) {
+            listeningText = "Wake-word listening is paused while Natuu is open.";
+        } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            listeningText = "Local-only background wake needs Android 12+; use the in-app microphone.";
+        } else if (localRecognitionUnavailable) {
+            listeningText = "On-device speech service unavailable. Wake listening is paused to save battery and data.";
+        } else if (offlineLanguageWarning) {
+            listeningText = "A local Bangla/English speech pack may be missing. Install offline packs in Settings.";
+        } else {
+            listeningText = "Battery saver: on-device listening for “Hey Natu”. Tap Stop to disable.";
+        }
         builder.setSmallIcon(R.drawable.ic_natuu)
                 .setContentTitle("Hey Natu is enabled")
-                .setContentText(paused ? "Wake-word listening is paused while Natuu is open." : "Listening for “Hey Natu”. Tap Stop to disable.")
+                .setContentText(listeningText)
                 .setContentIntent(content)
                 .setOngoing(true)
                 .setOnlyAlertOnce(true)
@@ -194,66 +209,119 @@ public final class WakeWordService extends Service {
     private void startListeningCycle() {
         if (destroyed || !enabled || paused || listening) return;
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            localRecognitionUnavailable = true;
             updateNotification();
-            scheduleListening(5000);
+            scheduleListening(60_000);
+            return;
+        }
+        // Do not use the default (potentially cloud-backed) recognizer for an
+        // always-on background wake loop. Continuous remote recognition drains
+        // battery and data; require Android's on-device recognizer instead.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S
+                || !SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+            stopRecognizer();
+            localRecognitionUnavailable = true;
+            updateNotification();
+            scheduleListening(60_000);
             return;
         }
         try {
-            stopRecognizer();
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && SpeechRecognizer.isOnDeviceRecognitionAvailable(this)) {
+            if (recognizer == null) {
                 recognizer = SpeechRecognizer.createOnDeviceSpeechRecognizer(this);
-            } else {
-                recognizer = SpeechRecognizer.createSpeechRecognizer(this);
-            }
-            recognizer.setRecognitionListener(new RecognitionListener() {
-                @Override public void onReadyForSpeech(android.os.Bundle params) { listening = true; }
-                @Override public void onBeginningOfSpeech() { }
-                @Override public void onRmsChanged(float rmsdB) { }
-                @Override public void onBufferReceived(byte[] buffer) { }
-                @Override public void onEndOfSpeech() { }
-                @Override public void onError(int error) {
-                    listening = false;
-                    if (recognizer != null) {
-                        try { recognizer.cancel(); } catch (Exception ignored) { }
+                recognizer.setRecognitionListener(new RecognitionListener() {
+                    @Override public void onReadyForSpeech(android.os.Bundle params) {
+                        listening = true;
+                        localRecognitionUnavailable = false;
+                        offlineLanguageWarning = false;
+                        updateNotification();
                     }
-                    scheduleListening(error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY ? 1300 : 900);
-                }
-                @Override public void onResults(android.os.Bundle results) {
-                    listening = false;
-                    ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                    if (matches != null) {
-                        for (String match : matches) {
-                            String command = extractWakeCommand(match);
-                            if (command != null) {
-                                triggerWake(command);
+                    @Override public void onBeginningOfSpeech() { }
+                    @Override public void onRmsChanged(float rmsdB) { }
+                    @Override public void onBufferReceived(byte[] buffer) { }
+                    @Override public void onEndOfSpeech() { }
+                    @Override public void onError(int error) {
+                        listening = false;
+                        if (error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE
+                                || error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED) {
+                            offlineLanguageWarning = true;
+                            // Android 14's dual-language mode may fail when one of the
+                            // requested offline packs is missing. Fall back to alternating
+                            // local language requests, never to cloud recognition.
+                            if (Build.VERSION.SDK_INT >= 34 && !disableAutoLanguageSwitch) {
+                                disableAutoLanguageSwitch = true;
+                                nextRecognitionLanguage = 0;
+                                updateNotification();
+                                scheduleListening(1800);
                                 return;
                             }
+                            updateNotification();
+                            scheduleListening(12_000);
+                            return;
+                        }
+                        if (error == SpeechRecognizer.ERROR_RECOGNIZER_BUSY) {
+                            try { if (recognizer != null) recognizer.cancel(); } catch (Exception ignored) { }
+                            scheduleListening(3000);
+                        } else if (error == SpeechRecognizer.ERROR_NO_MATCH
+                                || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                            // Give the recognizer time between background attempts.
+                            scheduleListening(2200);
+                        } else {
+                            scheduleListening(5000);
                         }
                     }
-                    scheduleListening(450);
-                }
-                @Override public void onPartialResults(android.os.Bundle partialResults) { }
-                @Override public void onEvent(int eventType, android.os.Bundle params) { }
-            });
+                    @Override public void onResults(android.os.Bundle results) {
+                        listening = false;
+                        offlineLanguageWarning = false;
+                        ArrayList<String> matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
+                        if (matches != null) {
+                            for (String match : matches) {
+                                String command = extractWakeCommand(match);
+                                if (command != null) {
+                                    triggerWake(command);
+                                    return;
+                                }
+                            }
+                        }
+                        scheduleListening(1800);
+                    }
+                    @Override public void onPartialResults(android.os.Bundle partialResults) { }
+                    @Override public void onEvent(int eventType, android.os.Bundle params) { }
+                });
+            }
+
             Intent speechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
             speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            // Alternate English and Bangla recognizers so both “Hey Natu” and “নাতু” can wake the app.
-            String recognitionLanguage = (nextRecognitionLanguage++ % 2 == 0) ? "en-US" : "bn-BD";
-            speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, recognitionLanguage);
-            speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, recognitionLanguage);
-            speechIntent.putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false);
+            if (Build.VERSION.SDK_INT >= 34 && !disableAutoLanguageSwitch) {
+                // Use dual-language local recognition only when both packs are available.
+                ArrayList<String> wakeLanguages = new ArrayList<>();
+                wakeLanguages.add("bn-BD");
+                wakeLanguages.add("en-US");
+                speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "bn-BD");
+                speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "bn-BD");
+                speechIntent.putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_DETECTION, true);
+                speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES, wakeLanguages);
+                speechIntent.putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_SWITCH, RecognizerIntent.LANGUAGE_SWITCH_BALANCED);
+                speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES, wakeLanguages);
+            } else {
+                // One local language per request on older Android versions, or when
+                // Android 14 reports that one of the two packs is unavailable.
+                String recognitionLanguage = (nextRecognitionLanguage++ % 2 == 0) ? "bn-BD" : "en-US";
+                speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, recognitionLanguage);
+                speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, recognitionLanguage);
+            }
             speechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
             speechIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3);
             speechIntent.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true);
-            speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 400L);
-            speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 800L);
-            speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1100L);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 700L);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 1800L);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2800L);
             recognizer.startListening(speechIntent);
             listening = true;
         } catch (Exception e) {
             listening = false;
-            stopRecognizer();
-            scheduleListening(1800);
+            // Keep the one local recognizer alive where possible. Repeatedly
+            // destroying/recreating it made the old background loop needlessly costly.
+            scheduleListening(5000);
         }
     }
 
@@ -303,7 +371,8 @@ public final class WakeWordService extends Service {
     }
 
     @Override public void onTaskRemoved(Intent rootIntent) {
-        // Intentionally keep the foreground service alive when the app is swiped away.
+        // Keep the explicitly enabled low-power local wake listener alive when the
+        // launcher task is swiped away. It never starts automatically after reboot.
         super.onTaskRemoved(rootIntent);
     }
 

@@ -40,3 +40,20 @@ The workflow has not been verified by a full Android Gradle build in this editin
 - Install the APK, test a normal typed chat, and test a supported native command.
 - Enable Hey Natu, leave the app in the background, and test the wake phrase while watching the persistent notification and microphone indicator.
 - Test on the actual phone: speech-provider behavior and battery restrictions vary by Android device.
+
+
+## Voice and language-pack troubleshooting (v1.3.0)
+
+- The LiteRT cache directory is now created and write-tested before engine initialization. If the folder cannot be written, Natuu reports a storage-related error instead of passing a missing directory to LiteRT.
+- Settings has separate **Download Bangla pack** and **Download English pack** controls. On Android 13+ these request a speech model download from the installed Android speech-recognition provider; Android 14+ can report progress. Providers may reject in-app downloads, and available locales depend on the provider/device. If a request is rejected, use **Open speech language settings** to install/manage the provider's offline speech models. Offline models are not bundled inside the APK.
+- Speech recognition packs are separate from text-to-speech (TTS) voice data. The **Open spoken voice / TTS data settings** button opens the phone's TTS data installer/settings. Install Bengali and English TTS voices there if the engine offers them. Natuu cannot force the phone to provide a language pack that the installed engine does not support.
+- Custom voice uses ElevenLabs `eleven_v3` for both English and Bengali because the official model list includes Bengali. It requires a working ElevenLabs API key, a successfully created voice ID, internet access, and remaining quota/access. The v3 request sends only `stability`; Similarity and Speaker Boost settings are not supported by v3. If synthesis fails, Natuu clearly reports the failure and falls back to the device's installed TTS voice.
+- The five supplied recordings are packaged as references, not as a ready-made voice model. Press **Create my custom voice** inside Natuu after supplying the separate ElevenLabs API key and confirming you own or have permission to clone the voice. The app cannot use a custom voice completely offline; offline AI text replies use the phone's installed TTS voice unless a separate offline voice model is integrated.
+
+
+## Battery-saving background wake mode (v1.4.0)
+
+- Background wake-word listening now uses Android's on-device `SpeechRecognizer` only; the always-on listener does not fall back to a cloud speech provider.
+- The recognizer is reused between wake checks instead of destroyed and recreated for every result. Recognition retries are throttled, and missing on-device language packs use a slow retry rather than a rapid loop.
+- Download the phone's on-device Bangla (`bn-BD`) and English (`en-US`) speech packs before enabling background wake-word detection. Manual voice input can still use its separate provider/fallback logic.
+- Background wake listening still uses the microphone and some battery. For lowest power use, turn off “Hey Natu” when you do not need it. This is not equivalent to a system-integrated low-power hotword DSP / default assistant implementation.

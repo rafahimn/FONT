@@ -1,4 +1,4 @@
-# Natuu — Personal AI Assistant (Android) · v1.1.0
+# Natuu — Personal AI Assistant (Android) · v1.3.0
 
 Natuu is a Bangla-first personal Android assistant with hybrid AI: OpenRouter free models online plus an optional local Qwen3-0.6B model for offline text chat. It also includes a local API-key setup screen, basic app-launch commands, dialer handoff, alarm handoff, and scheduled reminders.
 
@@ -9,7 +9,7 @@ Natuu is a Bangla-first personal Android assistant with hybrid AI: OpenRouter fr
 - OpenRouter OpenAI-compatible chat-completions API using `openrouter/free`, which routes requests to an available free model. Up to seven recent exchanges are included as context.
 - On-device offline text chat using LiteRT-LM with the public `litert-community/Qwen3-0.6B` model. The model is downloaded once inside Settings (about 586 MB) and saved to private app storage; it is not bundled inside the APK.
 - `Auto`, `Online`, and `Offline` chat modes. Auto mode uses online AI when configured and falls back to the downloaded local model if the online request fails.
-- Tap-to-talk Android SpeechRecognizer for voice input and TextToSpeech for spoken responses. Always-on wake-word listening (e.g., “Hey Natuu”) is not enabled in this MVP. If a custom voice has been configured, Natuu uses ElevenLabs text-to-speech; otherwise it uses the Pixel system TTS voice.
+- Tap-to-talk Android SpeechRecognizer for voice input and TextToSpeech for spoken responses. Optional “Hey Natu” wake-word listening uses the installed Android speech provider. If a custom voice has been created successfully, Natuu uses ElevenLabs text-to-speech for online replies; offline AI replies use the phone's installed TTS voice.
 - Optional custom voice cloning using five bundled audio samples (`natuu_voice_sample_01.mp3` through `natuu_voice_sample_04.mp3`, plus `natuu_voice_reference.mp3`). They are sent to ElevenLabs only when the user enters a separate ElevenLabs API key, checks the rights/consent box, and taps the clone button. OpenRouter handles the assistant’s AI replies.
 - Commands for opening a set of installed apps, handing calls to the system dialer, opening the Clock alarm UI, Bluetooth settings, and camera.
 - One-shot and daily local notification reminders; reminders are rescheduled after reboot where the Android system permits.
@@ -18,7 +18,7 @@ Natuu is a Bangla-first personal Android assistant with hybrid AI: OpenRouter fr
 
 ## Important limits
 
-This is an MVP source project intended to build into an installable APK, not a prebuilt APK attached to this archive, and not a limitless phone-control agent. The first offline-model download needs internet and about 586 MB of data/storage. On-device inference can use several GB of RAM, so a phone with 6 GB RAM or more is recommended; speed and stability depend on the device. Offline mode is for text AI. Voice transcription depends on Android speech-recognition services and may still need the internet or a downloaded language pack. Offline answers from the small 0.6B model are generally less capable than online models. Android permissions and default-app roles control what it can do. Calls are opened in the system dialer so you can check the number and tap Call; this build does **not** silently answer carrier calls or speak to callers. It also listens only when you tap the microphone; it is not an always-listening wake-word assistant yet. A full replacement dialer needs a compliant dial pad UI and Android `InCallService` implementation, and the user has to explicitly select it as the default phone app.
+This is an MVP source project intended to build into an installable APK, not a prebuilt APK attached to this archive, and not a limitless phone-control agent. The first offline-model download needs internet and about 586 MB of data/storage. On-device inference can use several GB of RAM, so a phone with 6 GB RAM or more is recommended; speed and stability depend on the device. Offline mode is for text AI. Voice transcription depends on Android speech-recognition services and may still need the internet or a downloaded language pack. Offline answers from the small 0.6B model are generally less capable than online models. Android permissions and default-app roles control what it can do. Calls are opened in the system dialer so you can check the number and tap Call; this build does **not** silently answer carrier calls or speak to callers. The optional wake-word service can listen while enabled and displays an ongoing notification; recognition depends on installed speech models and may use the normal speech provider when local models are unavailable. A full replacement dialer needs a compliant dial pad UI and Android `InCallService` implementation, and the user has to explicitly select it as the default phone app.
 
 A custom voice profile is not pre-generated. It is created from all five bundled samples (about 75 seconds total) only after you provide an ElevenLabs API key and explicitly confirm that you own or are authorized to use the voice. For the most consistent result, all samples should feature the same speaker and similar recording conditions; combining different speakers can reduce voice similarity or consistency. ElevenLabs recommends about 1–2 minutes of clean, consistent audio for best quality, so results may vary. The samples are uploaded to ElevenLabs when you press “Create voice”; they are not uploaded to OpenRouter. The app is designed for personal sideloading rather than publishing.
 
@@ -43,7 +43,7 @@ No subscription is required by this source project, but OpenRouter free limits a
 
 1. Create an ElevenLabs account and an API key at https://elevenlabs.io/app/settings/api-keys. This is a separate provider/key from OpenRouter. Plan access, pricing, and quota are determined by ElevenLabs.
 2. Open Natuu Settings, paste the key into “ElevenLabs API key”, tick the declaration that you own or are authorized to use the voice and consent to cloning, then tap “আমার দেওয়া voice reference দিয়ে কণ্ঠ তৈরি করো”.
-3. Natuu uploads all five MP3 samples to ElevenLabs in one voice-creation request, saves the returned voice ID encrypted on the phone, and uses ElevenLabs text-to-speech for subsequent spoken responses. If setup is skipped, Natuu keeps using the Pixel TTS voice.
+3. Natuu uploads all five MP3 samples to ElevenLabs in one voice-creation request, saves the returned voice ID encrypted on the phone, and uses ElevenLabs text-to-speech for subsequent spoken responses. If setup is skipped, Natuu uses the phone's installed TTS voice. Fully offline AI replies always use installed system TTS; the cloned voice requires an internet connection.
 4. The app itself does not publish anything. This optional feature does transmit the voice sample to ElevenLabs for processing. Keep the APK private because it embeds the personal voice reference audio.
 
 **Security note:** the app encrypts the API key at rest using Android Keystore, but any key used directly by a mobile client can potentially be extracted by a determined attacker. This APK is intended for personal sideloading only. For a public release, route OpenRouter requests through a backend and do not distribute a personal API key inside the app.
@@ -93,3 +93,20 @@ The actual wording recognised depends on your Pixel's active speech-recognition 
 - Background wake-word service English “Hey Natu” এবং বাংলা “নাতু/হেই নাতু” শনাক্ত করার জন্য English ও Bangla recognition পালাক্রমে চেষ্টা করে।
 - Microphone permission বা speech recognition error হলে আরও স্পষ্ট বাংলা error message দেখায়।
 - AI reply পেতে Settings-এ valid OpenRouter API key এবং Auto/Online mode ব্যবহার করতে হবে; free model provider-এর availability অনুযায়ী response time বদলাতে পারে।
+
+
+## Voice and language-pack troubleshooting (v1.3.0)
+
+- The LiteRT cache directory is now created and write-tested before engine initialization. If the folder cannot be written, Natuu reports a storage-related error instead of passing a missing directory to LiteRT.
+- Settings has separate **Download Bangla pack** and **Download English pack** controls. On Android 13+ these request a speech model download from the installed Android speech-recognition provider; Android 14+ can report progress. Providers may reject in-app downloads, and available locales depend on the provider/device. If a request is rejected, use **Open speech language settings** to install/manage the provider's offline speech models. Offline models are not bundled inside the APK.
+- Speech recognition packs are separate from text-to-speech (TTS) voice data. The **Open spoken voice / TTS data settings** button opens the phone's TTS data installer/settings. Install Bengali and English TTS voices there if the engine offers them. Natuu cannot force the phone to provide a language pack that the installed engine does not support.
+- Custom voice uses ElevenLabs `eleven_v3` for both English and Bengali because the official model list includes Bengali. It requires a working ElevenLabs API key, a successfully created voice ID, internet access, and remaining quota/access. The v3 request sends only `stability`; Similarity and Speaker Boost settings are not supported by v3. If synthesis fails, Natuu clearly reports the failure and falls back to the device's installed TTS voice.
+- The five supplied recordings are packaged as references, not as a ready-made voice model. Press **Create my custom voice** inside Natuu after supplying the separate ElevenLabs API key and confirming you own or have permission to clone the voice. The app cannot use a custom voice completely offline; offline AI text replies use the phone's installed TTS voice unless a separate offline voice model is integrated.
+
+
+## ব্যাটারি-সাশ্রয়ী ব্যাকগ্রাউন্ড ওয়েক মোড (v1.4.0)
+
+- ব্যাকগ্রাউন্ডে “Hey Natu” শনাক্ত করার জন্য এখন শুধু Android-এর on-device speech recognizer ব্যবহার করা হয়; সারাক্ষণ চলা wake listener cloud speech service-এ fallback করবে না।
+- প্রতিবার ফলাফলের পর recognizer ধ্বংস করে নতুন করে তৈরি না করে একই recognizer পুনরায় ব্যবহার করা হয়। Retry-এর ব্যবধান বাড়ানো হয়েছে।
+- চালু করার আগে ফোনে Bangla (`bn-BD`) ও English (`en-US`) offline speech pack নামিয়ে নাও।
+- ব্যাকগ্রাউন্ডে microphone চালু থাকলে কিছু battery তবুও খরচ হবে। কম power চাইলে দরকার না থাকলে “Hey Natu” বন্ধ রাখো। এটি system-integrated low-power hotword DSP-এর সমতুল্য নয়।
