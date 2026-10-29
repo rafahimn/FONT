@@ -49,6 +49,7 @@ public final class WakeWordService extends Service {
     private boolean foreground;
     private boolean wakePendingForNotification;
     private String pendingWakeCommand = "";
+    private int nextRecognitionLanguage = 0;
     private boolean destroyed;
 
     public static boolean isEnabled(Context context) {
@@ -236,8 +237,10 @@ public final class WakeWordService extends Service {
             });
             Intent speechIntent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
             speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.US.toLanguageTag());
-            speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, Locale.US.toLanguageTag());
+            // Alternate English and Bangla recognizers so both “Hey Natu” and “নাতু” can wake the app.
+            String recognitionLanguage = (nextRecognitionLanguage++ % 2 == 0) ? "en-US" : "bn-BD";
+            speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, recognitionLanguage);
+            speechIntent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, recognitionLanguage);
             speechIntent.putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false);
             speechIntent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false);
             speechIntent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3);
@@ -257,12 +260,18 @@ public final class WakeWordService extends Service {
     /** Returns null when the phrase is absent, otherwise the command after the wake phrase. */
     private String extractWakeCommand(String phrase) {
         if (phrase == null) return null;
-        String normalized = phrase.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9 ]", " ").replaceAll("\\s+", " ").trim();
+        String raw = phrase.toLowerCase(Locale.ROOT).trim();
+        // Keep Bengali letters when speech recognition returns native Bangla script.
+        String normalized = raw.replaceAll("[^\\p{L}\\p{N} ]", " ").replaceAll("\\s+", " ").trim();
         normalized = normalized.replace("hey nat you", "hey natu").replace("hey nattu", "hey natu").replace("hey nattoo", "hey natu").replace("hey nat u", "hey natu");
-        Matcher matcher = Pattern.compile("\\bhey\\s+natu{1,2}\\b").matcher(normalized);
-        if (!matcher.find()) return null;
-        String command = normalized.substring(matcher.end()).trim();
-        return command;
+        Matcher english = Pattern.compile("\\bhey\\s+natu{1,2}\\b").matcher(normalized);
+        if (english.find()) return normalized.substring(english.end()).trim();
+        Matcher bangla = Pattern.compile("(?:হেই|এই|হে)?\\s*(নাতু|নাতূ|নাটু)").matcher(normalized);
+        if (bangla.find()) return normalized.substring(bangla.end()).trim();
+        // Some recognizers romanize the Bangla wake name and omit “Hey”.
+        Matcher romanized = Pattern.compile("(?:^|\\s)(natu|nattu|nattoo)(?:$|\\s)").matcher(normalized);
+        if (romanized.find()) return normalized.substring(romanized.end()).trim();
+        return null;
     }
 
     private void triggerWake(String command) {

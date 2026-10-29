@@ -275,7 +275,14 @@ public class MainActivity extends Activity {
                 @Override public void onBufferReceived(byte[] buffer) { }
                 @Override public void onEndOfSpeech() { sendStatus("thinking"); }
                 @Override public void onError(int error) {
-                    String message = error == SpeechRecognizer.ERROR_NO_MATCH ? "I did not catch that. Please try again." : "Voice input was interrupted. Please try again.";
+                    String message;
+                    if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                        message = "কথাটি বুঝতে পারিনি। আবার বলুন, অথবা মাইক্রোফোনের পাশে শান্ত পরিবেশে চেষ্টা করুন। চাইলে Settings-এ speech service/language check করুন।";
+                    } else if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                        message = "ভয়েস ব্যবহারের জন্য Microphone permission দিন: Android Settings → Apps → Natuu → Permissions।";
+                    } else {
+                        message = "ভয়েস ইনপুট শুরু হয়নি। ইন্টারনেট, Microphone permission এবং Google Speech Services চালু আছে কি না দেখুন। (Error " + error + ")";
+                    }
                     sendStatus("idle"); sendNativeEvent(message);
                 }
                 @Override public void onResults(Bundle results) {
@@ -289,8 +296,9 @@ public class MainActivity extends Activity {
             });
             Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
             intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US");
-            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "en-US");
+            // Prefer Bangla for natural Bengali commands; Google Speech can still return mixed-language text.
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "bn-BD");
+            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "bn-BD");
             intent.putExtra(RecognizerIntent.EXTRA_ONLY_RETURN_LANGUAGE_PREFERENCE, false);
             intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
             intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3);

@@ -84,3 +84,12 @@ The actual wording recognised depends on your Pixel's active speech-recognition 
 - Default model: `openrouter/free`
 - Voice reference assets: `app/src/main/assets/natuu_voice_sample_01.mp3` through `natuu_voice_sample_04.mp3`, plus `natuu_voice_reference.mp3` (five provided samples)
 - Source language: Java + HTML/CSS/JavaScript; no third-party app libraries are required.
+
+
+## এই আপডেটে কী ঠিক করা হয়েছে
+
+- ছোট ফোন, landscape orientation, tablet এবং desktop WebView-এর জন্য responsive layout ও safe-area spacing উন্নত করা হয়েছে।
+- Voice command recognition এখন Bangla (bn-BD) language-কে অগ্রাধিকার দেয়।
+- Background wake-word service English “Hey Natu” এবং বাংলা “নাতু/হেই নাতু” শনাক্ত করার জন্য English ও Bangla recognition পালাক্রমে চেষ্টা করে।
+- Microphone permission বা speech recognition error হলে আরও স্পষ্ট বাংলা error message দেখায়।
+- AI reply পেতে Settings-এ valid OpenRouter API key এবং Auto/Online mode ব্যবহার করতে হবে; free model provider-এর availability অনুযায়ী response time বদলাতে পারে।
