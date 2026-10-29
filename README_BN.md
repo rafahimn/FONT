@@ -1,14 +1,16 @@
 # Natuu — Personal AI Assistant (Android) · v1.1.0
 
-Natuu is a personal Android assistant prototype for a Google Pixel phone. It has a Bangla-first voice interface, Gemini chat, a local API-key setup screen, basic app-launch commands, dialer handoff, alarm handoff, and scheduled reminders.
+Natuu is a Bangla-first personal Android assistant with hybrid AI: OpenRouter free models online plus an optional local Qwen3-0.6B model for offline text chat. It also includes a local API-key setup screen, basic app-launch commands, dialer handoff, alarm handoff, and scheduled reminders.
 
 ## Included in this build
 
-- First-run Gemini API key setup popup and model selection.
+- First-run OpenRouter API key setup popup and free-model selection.
 - API key stored encrypted using Android Keystore (device-local at-rest protection).
-- Gemini `generateContent` chat using `gemini-3.8-flash` by default.
+- OpenRouter OpenAI-compatible chat-completions API using `openrouter/free`, which routes requests to an available free model. Up to seven recent exchanges are included as context.
+- On-device offline text chat using LiteRT-LM with the public `litert-community/Qwen3-0.6B` model. The model is downloaded once inside Settings (about 586 MB) and saved to private app storage; it is not bundled inside the APK.
+- `Auto`, `Online`, and `Offline` chat modes. Auto mode uses online AI when configured and falls back to the downloaded local model if the online request fails.
 - Tap-to-talk Android SpeechRecognizer for voice input and TextToSpeech for spoken responses. Always-on wake-word listening (e.g., “Hey Natuu”) is not enabled in this MVP. If a custom voice has been configured, Natuu uses ElevenLabs text-to-speech; otherwise it uses the Pixel system TTS voice.
-- Optional custom voice cloning using the audio clip supplied by the owner (`app/src/main/assets/natuu_voice_reference.mp3`). The clip is only sent to ElevenLabs when the user enters a separate ElevenLabs API key, checks the rights/consent box, and taps the clone button. Gemini still handles the assistant’s AI replies.
+- Optional custom voice cloning using the audio clip supplied by the owner (`app/src/main/assets/natuu_voice_reference.mp3`). The clip is only sent to ElevenLabs when the user enters a separate ElevenLabs API key, checks the rights/consent box, and taps the clone button. OpenRouter handles the assistant’s AI replies.
 - Commands for opening a set of installed apps, handing calls to the system dialer, opening the Clock alarm UI, Bluetooth settings, and camera.
 - One-shot and daily local notification reminders; reminders are rescheduled after reboot where the Android system permits.
 - Basic chat UI with quick actions and a settings sheet.
@@ -16,25 +18,35 @@ Natuu is a personal Android assistant prototype for a Google Pixel phone. It has
 
 ## Important limits
 
-This is an MVP source project intended to build into an installable APK, not a prebuilt APK attached to this archive, and not a limitless phone-control agent. Android permissions and default-app roles control what it can do. Calls are opened in the system dialer so you can check the number and tap Call; this build does **not** silently answer carrier calls or speak to callers. It also listens only when you tap the microphone; it is not an always-listening wake-word assistant yet. A full replacement dialer needs a compliant dial pad UI and Android `InCallService` implementation, and the user has to explicitly select it as the default phone app.
+This is an MVP source project intended to build into an installable APK, not a prebuilt APK attached to this archive, and not a limitless phone-control agent. The first offline-model download needs internet and about 586 MB of data/storage. On-device inference can use several GB of RAM, so a phone with 6 GB RAM or more is recommended; speed and stability depend on the device. Offline mode is for text AI. Voice transcription depends on Android speech-recognition services and may still need the internet or a downloaded language pack. Offline answers from the small 0.6B model are generally less capable than online models. Android permissions and default-app roles control what it can do. Calls are opened in the system dialer so you can check the number and tap Call; this build does **not** silently answer carrier calls or speak to callers. It also listens only when you tap the microphone; it is not an always-listening wake-word assistant yet. A full replacement dialer needs a compliant dial pad UI and Android `InCallService` implementation, and the user has to explicitly select it as the default phone app.
 
-A custom voice profile is not pre-generated. It is created from the bundled reference clip only after you provide an ElevenLabs API key and explicitly confirm that you own or are authorized to use the voice. This path does not use Google’s voice-replication endpoint, which requires a separate recorded consent statement; Gemini remains the AI/chat provider. The supplied reference clip is about 27 seconds. ElevenLabs accepts clips as short as 10 seconds in total, but recommends 1–2 minutes of clean, consistent audio for better quality; results with the included clip may vary. Your reference audio is uploaded to ElevenLabs when you press “Create voice”; it is not uploaded to Gemini, and the app is designed for personal sideloading rather than publishing.
+A custom voice profile is not pre-generated. It is created from the bundled reference clip only after you provide an ElevenLabs API key and explicitly confirm that you own or are authorized to use the voice. This path does not use Google’s voice-replication endpoint, which requires a separate recorded consent statement; OpenRouter remains the AI/chat provider. The supplied reference clip is about 27 seconds. ElevenLabs accepts clips as short as 10 seconds in total, but recommends 1–2 minutes of clean, consistent audio for better quality; results with the included clip may vary. Your reference audio is uploaded to ElevenLabs when you press “Create voice”; it is not uploaded to OpenRouter, and the app is designed for personal sideloading rather than publishing.
 
-## Get a Gemini API key
+## Get an OpenRouter API key
 
-1. Open Google AI Studio: https://aistudio.google.com/app/apikey
-2. Create or select a Gemini API key/project with API access enabled.
-3. Keep the key private. API requests may consume quota or incur charges according to your account and model access.
-4. Launch Natuu and paste the key into the first-run setup dialog. This is the only key needed for Gemini chat and the built-in phone TTS fallback.
+1. Open https://openrouter.ai/settings/keys and sign in.
+2. Create an API key in your OpenRouter account.
+3. Launch Natuu and paste the key into the first-run setup dialog. The default model is `openrouter/free`, which routes to an available free model.
+4. Free model requests have rate limits and may be slower or temporarily unavailable. Check https://openrouter.ai/collections/free-models for current limits. This app defaults only to the free router; changing it to a paid model is not exposed in this build.
+
+## Set up free hybrid AI
+
+1. Open Natuu Settings.
+2. For online AI, add an OpenRouter API key from https://openrouter.ai/settings/keys. Free-model requests have rate limits and providers can be unavailable.
+3. Tap **Offline AI model ডাউনলোড করো** while connected to Wi-Fi. The `Qwen3-0.6B.litertlm` file is about 586 MB and is saved privately on the device. Keep Natuu open until the download finishes.
+4. Choose **Auto** to use OpenRouter online first and fall back to the local model if the online request fails, **Online** to require OpenRouter, or **Offline** to use only the on-device model.
+5. After the local model is downloaded, switch the phone to Airplane mode and test text chat. Speech recognition may depend on Android's installed speech service/language pack.
+
+No subscription is required by this source project, but OpenRouter free limits and model availability can change. The local model requires device resources and is not unlimited in quality or speed.
 
 ## Optional: Create your personal reference voice
 
-1. Create an ElevenLabs account and an API key at https://elevenlabs.io/app/settings/api-keys. This is a separate provider/key from Gemini. Plan access, pricing, and quota are determined by ElevenLabs.
+1. Create an ElevenLabs account and an API key at https://elevenlabs.io/app/settings/api-keys. This is a separate provider/key from OpenRouter. Plan access, pricing, and quota are determined by ElevenLabs.
 2. Open Natuu Settings, paste the key into “ElevenLabs API key”, tick the declaration that you own or are authorized to use the voice and consent to cloning, then tap “আমার দেওয়া voice reference দিয়ে কণ্ঠ তৈরি করো”.
 3. Natuu uploads the included 27-second MP3 reference to ElevenLabs, saves the returned voice ID encrypted on the phone, and uses ElevenLabs text-to-speech for subsequent spoken responses. If setup is skipped, Natuu keeps using the Pixel TTS voice.
 4. The app itself does not publish anything. This optional feature does transmit the voice sample to ElevenLabs for processing. Keep the APK private because it embeds the personal voice reference audio.
 
-**Security note:** the app encrypts the API key at rest using Android Keystore, but any key used directly by a mobile client can potentially be extracted by a determined attacker. This APK is intended for personal sideloading only. For a public release, route Gemini requests through a backend and do not distribute a personal API key inside the app.
+**Security note:** the app encrypts the API key at rest using Android Keystore, but any key used directly by a mobile client can potentially be extracted by a determined attacker. This APK is intended for personal sideloading only. For a public release, route OpenRouter requests through a backend and do not distribute a personal API key inside the app.
 
 ## Build an APK using GitHub Actions (no local Android SDK required)
 
@@ -69,6 +81,6 @@ The actual wording recognised depends on your Pixel's active speech-recognition 
 - Application ID: `com.natuu.assistant`
 - Minimum Android: 8.0 (API 26)
 - Target SDK: 35
-- Default model: `gemini-3.8-flash`
+- Default model: `openrouter/free`
 - Voice reference asset: `app/src/main/assets/natuu_voice_reference.mp3` (included from the user-provided audio)
 - Source language: Java + HTML/CSS/JavaScript; no third-party app libraries are required.

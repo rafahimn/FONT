@@ -18,7 +18,7 @@ public class ReminderReceiver extends BroadcastReceiver {
     @Override public void onReceive(Context context, Intent intent) {
         long id = intent.getLongExtra("id", System.currentTimeMillis());
         String title = intent.getStringExtra("title");
-        if (title == null || title.trim().isEmpty()) title = "তোমার রিমাইন্ডার";
+        if (title == null || title.trim().isEmpty()) title = "Your reminder";
         boolean daily = intent.getBooleanExtra("daily", false);
 
         Intent open = new Intent(context, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);

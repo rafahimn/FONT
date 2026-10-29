@@ -18,7 +18,7 @@ import javax.crypto.spec.GCMParameterSpec;
 /** Encrypts the locally stored API key with a key held by Android Keystore. */
 public final class SecureStore {
     private static final String PREFS = "natuu_secure_prefs";
-    private static final String KEY_API = "gemini_api_key_v1";
+    private static final String KEY_API = "openrouter_api_key_v1";
     private static final String KEY_VOICE_API = "elevenlabs_api_key_v1";
     private static final String KEY_VOICE_ID = "elevenlabs_voice_id_v1";
     private static final String ALIAS = "natuu_gemini_key_aes";
@@ -27,6 +27,7 @@ public final class SecureStore {
 
     public static void saveApiKey(Context context, String apiKey) throws Exception {
         saveSecret(context, KEY_API, apiKey);
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove("gemini_api_key_v1").apply();
     }
 
     public static String getApiKey(Context context) {
@@ -34,7 +35,8 @@ public final class SecureStore {
     }
 
     public static void clearApiKey(Context context) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().remove(KEY_API).apply();
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .remove(KEY_API).remove("gemini_api_key_v1").apply();
     }
 
     public static void saveVoiceApiKey(Context context, String apiKey) throws Exception {
