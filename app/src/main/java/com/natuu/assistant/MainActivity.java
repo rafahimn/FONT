@@ -863,13 +863,26 @@ public class MainActivity extends Activity {
                 connection.setRequestProperty("xi-api-key", apiKey);
                 connection.setRequestProperty("Accept", "application/json");
                 connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-                try (OutputStream out = connection.getOutputStream(); InputStream voice = getAssets().open("natuu_voice_reference.mp3")) {
+                try (OutputStream out = connection.getOutputStream()) {
                     writeFormField(out, boundary, "name", "Natuu Personal Voice");
-                    writeFormField(out, boundary, "description", "Private personal assistant voice created from the user's provided reference audio.");
-                    out.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"files\"; filename=\"natuu_voice_reference.mp3\"\r\nContent-Type: audio/mpeg\r\n\r\n").getBytes(StandardCharsets.UTF_8));
-                    byte[] buffer = new byte[8192]; int count;
-                    while ((count = voice.read(buffer)) != -1) out.write(buffer, 0, count);
-                    out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+                    writeFormField(out, boundary, "description", "Personal assistant voice created from five user-provided voice reference samples.");
+                    String[] sampleAssets = new String[] {
+                        "natuu_voice_sample_01.mp3",
+                        "natuu_voice_sample_02.mp3",
+                        "natuu_voice_sample_03.mp3",
+                        "natuu_voice_sample_04.mp3",
+                        "natuu_voice_reference.mp3"
+                    };
+                    byte[] buffer = new byte[8192];
+                    for (String sampleName : sampleAssets) {
+                        out.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"files[]\"; filename=\"" + sampleName + "\"\r\nContent-Type: audio/mpeg\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+                        try (InputStream voice = getAssets().open(sampleName)) {
+                            int count;
+                            while ((count = voice.read(buffer)) != -1) out.write(buffer, 0, count);
+                        }
+                        out.write("\r\n".getBytes(StandardCharsets.UTF_8));
+                    }
+                    out.write(("--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
                     out.flush();
                 }
                 int status = connection.getResponseCode();

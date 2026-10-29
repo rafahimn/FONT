@@ -10,7 +10,7 @@ Natuu is a Bangla-first personal Android assistant with hybrid AI: OpenRouter fr
 - On-device offline text chat using LiteRT-LM with the public `litert-community/Qwen3-0.6B` model. The model is downloaded once inside Settings (about 586 MB) and saved to private app storage; it is not bundled inside the APK.
 - `Auto`, `Online`, and `Offline` chat modes. Auto mode uses online AI when configured and falls back to the downloaded local model if the online request fails.
 - Tap-to-talk Android SpeechRecognizer for voice input and TextToSpeech for spoken responses. Always-on wake-word listening (e.g., “Hey Natuu”) is not enabled in this MVP. If a custom voice has been configured, Natuu uses ElevenLabs text-to-speech; otherwise it uses the Pixel system TTS voice.
-- Optional custom voice cloning using the audio clip supplied by the owner (`app/src/main/assets/natuu_voice_reference.mp3`). The clip is only sent to ElevenLabs when the user enters a separate ElevenLabs API key, checks the rights/consent box, and taps the clone button. OpenRouter handles the assistant’s AI replies.
+- Optional custom voice cloning using five bundled audio samples (`natuu_voice_sample_01.mp3` through `natuu_voice_sample_04.mp3`, plus `natuu_voice_reference.mp3`). They are sent to ElevenLabs only when the user enters a separate ElevenLabs API key, checks the rights/consent box, and taps the clone button. OpenRouter handles the assistant’s AI replies.
 - Commands for opening a set of installed apps, handing calls to the system dialer, opening the Clock alarm UI, Bluetooth settings, and camera.
 - One-shot and daily local notification reminders; reminders are rescheduled after reboot where the Android system permits.
 - Basic chat UI with quick actions and a settings sheet.
@@ -20,7 +20,7 @@ Natuu is a Bangla-first personal Android assistant with hybrid AI: OpenRouter fr
 
 This is an MVP source project intended to build into an installable APK, not a prebuilt APK attached to this archive, and not a limitless phone-control agent. The first offline-model download needs internet and about 586 MB of data/storage. On-device inference can use several GB of RAM, so a phone with 6 GB RAM or more is recommended; speed and stability depend on the device. Offline mode is for text AI. Voice transcription depends on Android speech-recognition services and may still need the internet or a downloaded language pack. Offline answers from the small 0.6B model are generally less capable than online models. Android permissions and default-app roles control what it can do. Calls are opened in the system dialer so you can check the number and tap Call; this build does **not** silently answer carrier calls or speak to callers. It also listens only when you tap the microphone; it is not an always-listening wake-word assistant yet. A full replacement dialer needs a compliant dial pad UI and Android `InCallService` implementation, and the user has to explicitly select it as the default phone app.
 
-A custom voice profile is not pre-generated. It is created from the bundled reference clip only after you provide an ElevenLabs API key and explicitly confirm that you own or are authorized to use the voice. This path does not use Google’s voice-replication endpoint, which requires a separate recorded consent statement; OpenRouter remains the AI/chat provider. The supplied reference clip is about 27 seconds. ElevenLabs accepts clips as short as 10 seconds in total, but recommends 1–2 minutes of clean, consistent audio for better quality; results with the included clip may vary. Your reference audio is uploaded to ElevenLabs when you press “Create voice”; it is not uploaded to OpenRouter, and the app is designed for personal sideloading rather than publishing.
+A custom voice profile is not pre-generated. It is created from all five bundled samples (about 75 seconds total) only after you provide an ElevenLabs API key and explicitly confirm that you own or are authorized to use the voice. For the most consistent result, all samples should feature the same speaker and similar recording conditions; combining different speakers can reduce voice similarity or consistency. ElevenLabs recommends about 1–2 minutes of clean, consistent audio for best quality, so results may vary. The samples are uploaded to ElevenLabs when you press “Create voice”; they are not uploaded to OpenRouter. The app is designed for personal sideloading rather than publishing.
 
 ## Get an OpenRouter API key
 
@@ -43,7 +43,7 @@ No subscription is required by this source project, but OpenRouter free limits a
 
 1. Create an ElevenLabs account and an API key at https://elevenlabs.io/app/settings/api-keys. This is a separate provider/key from OpenRouter. Plan access, pricing, and quota are determined by ElevenLabs.
 2. Open Natuu Settings, paste the key into “ElevenLabs API key”, tick the declaration that you own or are authorized to use the voice and consent to cloning, then tap “আমার দেওয়া voice reference দিয়ে কণ্ঠ তৈরি করো”.
-3. Natuu uploads the included 27-second MP3 reference to ElevenLabs, saves the returned voice ID encrypted on the phone, and uses ElevenLabs text-to-speech for subsequent spoken responses. If setup is skipped, Natuu keeps using the Pixel TTS voice.
+3. Natuu uploads all five MP3 samples to ElevenLabs in one voice-creation request, saves the returned voice ID encrypted on the phone, and uses ElevenLabs text-to-speech for subsequent spoken responses. If setup is skipped, Natuu keeps using the Pixel TTS voice.
 4. The app itself does not publish anything. This optional feature does transmit the voice sample to ElevenLabs for processing. Keep the APK private because it embeds the personal voice reference audio.
 
 **Security note:** the app encrypts the API key at rest using Android Keystore, but any key used directly by a mobile client can potentially be extracted by a determined attacker. This APK is intended for personal sideloading only. For a public release, route OpenRouter requests through a backend and do not distribute a personal API key inside the app.
@@ -82,5 +82,5 @@ The actual wording recognised depends on your Pixel's active speech-recognition 
 - Minimum Android: 8.0 (API 26)
 - Target SDK: 35
 - Default model: `openrouter/free`
-- Voice reference asset: `app/src/main/assets/natuu_voice_reference.mp3` (included from the user-provided audio)
+- Voice reference assets: `app/src/main/assets/natuu_voice_sample_01.mp3` through `natuu_voice_sample_04.mp3`, plus `natuu_voice_reference.mp3` (five provided samples)
 - Source language: Java + HTML/CSS/JavaScript; no third-party app libraries are required.

@@ -29,6 +29,7 @@ The workflow has not been verified by a full Android Gradle build in this editin
 ## Online and offline AI
 
 - Online mode uses an OpenRouter API key entered by the user.
+- Optional voice cloning sends five bundled reference samples to ElevenLabs after the user provides an ElevenLabs API key and confirms they have rights to use the voice. Use consistent samples from one speaker for best results.
 - Offline mode can download the configured on-device model from the app Settings. The first download requires an internet connection and storage space.
 - Keep API keys private. A client-side app cannot completely hide a key while using it to call a remote API.
 
